@@ -6,7 +6,7 @@ interface EscalatorMonologueSubpageProps {
   onClose: () => void;
 }
 
-const MONOLOGUE_TEXT = `「當你拿著鎬子系著登山繩 一下一下的登到山上
+export const MONOLOGUE_TEXT = `「當你拿著鎬子系著登山繩 一下一下的登到山上
 然後你他媽轉頭看到那一邊有一個『登山電扶梯』
 
 然後你大老遠的又跑下去 跑去電扶梯入口看一眼

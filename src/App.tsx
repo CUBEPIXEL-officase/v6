@@ -3276,8 +3276,8 @@ const BroadcastStudioPage: React.FC<{
   );
 };
 export default function App() {
-  const isEmbeddedDesktop = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('desktop') === '1';
-  const [isMobile, setIsMobile] = useState(false);
+  const isEmbeddedDesktop = false;
+  const [isMobile, setIsMobile] = useState(true);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [dimensions, setDimensions] = useState({ cols: 0, rows: 0 });
   const [gameState, setGameState] = useState<'idle' | 'forming' | 'formed' | 'dissolving' | 'next_page' | 'special' | 'umiri_special' | 'special_thanks' | 'idol_studio' | 'banned_list'>('idle');
@@ -3810,30 +3810,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    const checkDevice = () => {
-      if (isEmbeddedDesktop) {
-        setIsMobile(false);
-        return;
-      }
-      const ua = navigator.userAgent;
-      const isTouch = navigator.maxTouchPoints > 0;
-      const isSmallWidth = window.innerWidth < 1024;
-      
-      // Heuristic for mobile phones (including "Desktop Site" mode)
-      const isPhoneUA = /Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-      const isIPad = /iPad/i.test(ua) || (isTouch && /Macintosh/i.test(ua) && window.innerWidth >= 768);
-      
-      if ((isPhoneUA || (isTouch && !isIPad)) && isSmallWidth) {
-        setIsMobile(true);
-      } else {
-        setIsMobile(false);
-      }
-    };
-
-    checkDevice();
-    window.addEventListener('resize', checkDevice);
-    return () => window.removeEventListener('resize', checkDevice);
-  }, [isEmbeddedDesktop]);
+    setIsMobile(true);
+  }, []);
 
   if (isMobile) {
     return (

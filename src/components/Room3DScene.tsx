@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { X } from 'lucide-react';
+import { EventCalendar, CATEGORY_COLORS, getEventsForDate } from './EventCalendar';
+import { EscalatorMonologueSubpage, MONOLOGUE_TEXT } from './EscalatorMonologueSubpage';
 
 interface Room3DSceneProps {
   onExitRoom?: () => void;
@@ -50,13 +53,15 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
 
   // Game, Camera Location, Active Portal Room & Light State
   const [isLampOn, setIsLampOn] = useState(true);
-  const [isConsoleHeld, setIsConsoleHeld] = useState(false);
-  const [isScreenActive, setIsScreenActive] = useState(false);
+  const [isCalendarModalOpen, setIsCalendarModalOpen] = useState(false);
+  const isCalendarModalOpenRef = useRef(false);
+  const [isMonologueOpen, setIsMonologueOpen] = useState(false);
+  const isMonologueOpenRef = useRef(false);
   const [viewLocation, setViewLocation] = useState<
-    'table' | 'cabinet' | 'door' | 'door2' | 'center' | 'desk' | 'capsule'
+    'table' | 'cabinet' | 'door' | 'door2' | 'center' | 'desk' | 'capsule' | 'board'
   >('table');
   const viewLocationRef = useRef<
-    'table' | 'cabinet' | 'door' | 'door2' | 'center' | 'desk' | 'capsule'
+    'table' | 'cabinet' | 'door' | 'door2' | 'center' | 'desk' | 'capsule' | 'board'
   >('table');
   const [activeRoom, setActiveRoom] = useState<RoomId>('lobby');
   const activeRoomRef = useRef<RoomId>('lobby');
@@ -70,13 +75,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
   const portalSwapTimeoutRef = useRef<number | null>(null);
   const portalFadeEndTimeoutRef = useRef<number | null>(null);
 
-  const desktopEmbedUrl = React.useMemo(() => {
-    if (typeof window === 'undefined') return '?desktop=1';
-    const url = new URL(window.location.href);
-    url.searchParams.set('desktop', '1');
-    return url.toString();
-  }, []);
-
   // Camera & Raycaster Refs
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const raycasterRef = useRef(new THREE.Raycaster());
@@ -85,7 +83,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
   const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
   const hemiLightRef = useRef<THREE.HemisphereLight | null>(null);
   const lobbyRoomGroupRef = useRef<THREE.Group | null>(null);
-  const consoleSceneRef = useRef<THREE.Group | null>(null);
+  const wallCalendarHitboxRef = useRef<THREE.Mesh | null>(null);
+  const monologuePaperHitboxRef = useRef<THREE.Mesh | null>(null);
 
   // Table Lamp 3D Object Refs for interactive tap & light control
   const lampGroupRef = useRef<THREE.Group | null>(null);
@@ -199,32 +198,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     )
   );
   const doorRattleTimerRef = useRef<number>(0);
-
-  // Blue-Violet Handheld Console 3D Refs & Hold Animation Tracker
-  const consoleGroupRef = useRef<THREE.Group | null>(null);
-  const isConsoleHeldRef = useRef<boolean>(false);
-  const consoleHoldLerpRef = useRef<number>(0);
-  const isScreenActiveRef = useRef<boolean>(false);
-  const screenOverlayRef = useRef<HTMLDivElement | null>(null);
-  const desktopIframeRef = useRef<HTMLIFrameElement | null>(null);
-
-  // Interactive 3D Handheld Control Refs (Left D-Pad Scroll & Right ABXY Pull Rope)
-  const dpadGroupRef = useRef<THREE.Group | null>(null);
-  const dpadRestZRef = useRef<number>(0);
-  const dpadUpHitboxRef = useRef<THREE.Mesh | null>(null);
-  const dpadDownHitboxRef = useRef<THREE.Mesh | null>(null);
-  const abxyHitboxRef = useRef<THREE.Mesh | null>(null);
-  const faceButtonMeshesRef = useRef<THREE.Mesh[]>([]);
-  const faceButtonRestZRef = useRef<number>(0);
-
-  const activeDpadDirRef = useRef<-1 | 0 | 1>(0);
-  const dpadPressStartTimeRef = useRef<number>(0);
-  const dpadHasScrolledRef = useRef<boolean>(false);
-  const activeConsoleTouchIdRef = useRef<number | null>(null);
-  const activeConsoleTouchRoleRef = useRef<'dpad' | 'abxy' | 'chassis' | null>(null);
-  const activeConsoleMouseRoleRef = useRef<'dpad' | 'abxy' | 'chassis' | null>(null);
-  const abxyPressedTimerRef = useRef<number>(0);
-  const pressedFaceBtnIdxRef = useRef<number | null>(null);
 
   // Tap vs Drag tracking for 3D Object Interaction
   const touchStartPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -461,6 +434,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     const wallTexture = createVerticalWoodSlatTexture();
     const tabletopTexture = createTabletopWoodTexture();
     const ceilingTexture = createCeilingTexture();
+    const extraRoomTexturesToDispose: THREE.Texture[] = [];
+    const textureLoader = new THREE.TextureLoader();
 
     // --- 3. ROOM ARCHITECTURE (大廳 - 10x7m) ---
     const roomGroup = new THREE.Group();
@@ -683,6 +658,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       isRusticArchedOak?: boolean;
       oakDoorTexture?: THREE.Texture;
       cuteRoomPlaqueTexture?: THREE.Texture;
+      dialOffset?: [number, number, number];
+      dialParentIsContainer?: boolean;
     }) => {
       const doorContainer = new THREE.Group();
       const isArched = Boolean(opts.isRusticArchedOak);
@@ -1102,9 +1079,15 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       doorHitbox.position.set(0, FD_HEIGHT / 2, 0.07);
       leafOffset.add(doorHitbox);
 
-      // Circular Steampunk 4-Sector Dial mounted at Peephole Spot (y = 1.38 on arched oak door, 1.54 on classic door)
+      // Circular Steampunk 4-Sector Dial
       const dialGroup = new THREE.Group();
-      dialGroup.position.set(0, isArched ? 1.38 : 1.54, 0.075);
+      if (opts.dialParentIsContainer) {
+        dialGroup.position.set(...(opts.dialOffset ?? [0.96 / 2 + 0.085 + 0.14, 1.45, 0.04]));
+        doorContainer.add(dialGroup);
+      } else {
+        dialGroup.position.set(0, isArched ? 1.38 : 1.54, 0.075);
+        leafOffset.add(dialGroup);
+      }
       dialGroup.scale.setScalar(1.30);
 
       const dialIronMat = new THREE.MeshStandardMaterial({ color: 0x1c1714, roughness: 0.46, metalness: 0.78 });
@@ -1326,11 +1309,14 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       dialHitbox.position.set(0, 0, 0.04);
       dialGroup.add(dialHitbox);
 
-      leafOffset.add(dialGroup);
+      if (!opts.dialParentIsContainer) {
+        leafOffset.add(dialGroup);
+      }
 
       return {
         doorGroup: doorContainer,
         leafPivot,
+        leafOffset,
         doorHitbox,
         dialHitbox,
         wheelGroup,
@@ -1342,7 +1328,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       };
     };
 
-    // Lobby Closed Door ("1F") & 4-Color Dial (草綠色, 紫色, 金色, 青色)
+    // Lobby Closed Door ("1F") & 4-Color Dial (草綠色, 紫色, 金色, 青色) - Dial restored to original position on door leaf
     const lobbyPortalDoor = createPortalDoorAndDial({
       colors: [0x65c226, 0x9333ea, 0xeab308, 0x06b6d4],
       hasColorSlot: [true, true, true, true],
@@ -1411,8 +1397,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       leg.castShadow = true;
       tableGroup.add(leg);
     });
-
-    const textureLoader = new THREE.TextureLoader();
 
     // --- 4A-1. BLACK VINYL RECORD & BLONDE WOOD EASEL ON WALL TABLE CENTER (牆邊木桌正中間黑膠唱片與底座) ---
     const vinylCenterTexture = textureLoader.load('/assets/vinyl_center_tex.png');
@@ -1570,7 +1554,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     // 2. Grooved Black 12" Vinyl Disc + Center Illustration Sticker resting on the easel ledge
     const DISC_R = 0.182;
     const discAssembly = new THREE.Group();
-    discAssembly.position.set(0, 0.063 + DISC_R, 0.0115);
+    // 往上移以配合放大後的半徑，穩穩坐在展示架橫桿凹槽上
+    discAssembly.position.set(0, 0.063 + DISC_R * 1.32, 0.0115);
 
     const vinylBodyMat = new THREE.MeshStandardMaterial({
       color: 0x101115,
@@ -1615,6 +1600,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     vinylCenterLabel.position.z = 0.0033;
     vinylCenterLabel.receiveShadow = true;
     discAssembly.add(vinylCenterLabel);
+    discAssembly.scale.setScalar(1.32); // 放大黑唱片的尺寸
 
     easelFrontFrame.add(discAssembly);
     vinylEaselGroup.add(easelFrontFrame);
@@ -2219,99 +2205,9 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     tableGroup.position.set(0, 0, -ROOM_DEPTH / 2 + TABLE_DEPTH / 2);
     roomGroup.add(tableGroup);
 
-    // --- 4A-2. LASER-ENGRAVED WOODEN STUDIO PLAQUE ON FRONT WALL (正前方橫桌偏左牆面木牌) ---
-    const plaqueTexture = textureLoader.load('/assets/studio_plaque_tex.png');
-    plaqueTexture.colorSpace = THREE.SRGBColorSpace;
-    plaqueTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-    const studioPlaqueGroup = new THREE.Group();
-    const PLAQUE_W = 0.62;
-    const PLAQUE_H = 0.40; // ~1.55 : 1 ratio matching reference photo
-    const PLAQUE_R = 0.034;
 
-    const plaqueShape = new THREE.Shape();
-    const pw = PLAQUE_W / 2;
-    const ph = PLAQUE_H / 2;
-    plaqueShape.moveTo(-pw + PLAQUE_R, -ph);
-    plaqueShape.lineTo(pw - PLAQUE_R, -ph);
-    plaqueShape.quadraticCurveTo(pw, -ph, pw, -ph + PLAQUE_R);
-    plaqueShape.lineTo(pw, ph - PLAQUE_R);
-    plaqueShape.quadraticCurveTo(pw, ph, pw - PLAQUE_R, ph);
-    plaqueShape.lineTo(-pw + PLAQUE_R, ph);
-    plaqueShape.quadraticCurveTo(-pw, ph, -pw, ph - PLAQUE_R);
-    plaqueShape.lineTo(-pw, -ph + PLAQUE_R);
-    plaqueShape.quadraticCurveTo(-pw, -ph, -pw + PLAQUE_R, -ph);
-
-    // 1. Solid Timber Board with Dark Laser-Charred Beveled Rim
-    const plaqueBoardGeo = new THREE.ExtrudeGeometry(plaqueShape, {
-      depth: 0.016,
-      bevelEnabled: true,
-      bevelThickness: 0.002,
-      bevelSize: 0.002,
-      bevelSegments: 3,
-      curveSegments: 12,
-    });
-    const plaqueEdgeMat = new THREE.MeshStandardMaterial({
-      color: 0x3b2010, // Charred walnut laser-cut rim
-      roughness: 0.62,
-      metalness: 0.04,
-    });
-    const plaqueBoard = new THREE.Mesh(plaqueBoardGeo, plaqueEdgeMat);
-    plaqueBoard.position.z = 0.008;
-    plaqueBoard.castShadow = true;
-    plaqueBoard.receiveShadow = true;
-    studioPlaqueGroup.add(plaqueBoard);
-
-    // 2. Front Laser-Engraved Beech Wood Grain Surface
-    const plaqueFaceGeo = new THREE.ShapeGeometry(plaqueShape, 12);
-    const uvAttr = plaqueFaceGeo.attributes.uv;
-    for (let i = 0; i < uvAttr.count; i++) {
-      const px = uvAttr.getX(i);
-      const py = uvAttr.getY(i);
-      uvAttr.setXY(i, (px + pw) / PLAQUE_W, (py + ph) / PLAQUE_H);
-    }
-    uvAttr.needsUpdate = true;
-
-    const plaqueFaceMat = new THREE.MeshStandardMaterial({
-      map: plaqueTexture,
-      color: 0xffffff,
-      roughness: 0.52,
-      metalness: 0.02,
-    });
-    const plaqueFace = new THREE.Mesh(plaqueFaceGeo, plaqueFaceMat);
-    plaqueFace.position.z = 0.0265;
-    plaqueFace.receiveShadow = true;
-    studioPlaqueGroup.add(plaqueFace);
-
-    // 3. Recessed Rear Wall Mounting Standoffs (6mm shadow offset off slat wall)
-    const standoffGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.008, 12);
-    standoffGeo.rotateX(Math.PI / 2);
-    const standoffMat = new THREE.MeshStandardMaterial({
-      color: 0x1e1610,
-      roughness: 0.5,
-      metalness: 0.4,
-    });
-    [
-      [-pw + 0.08, ph - 0.07],
-      [pw - 0.08, ph - 0.07],
-      [-pw + 0.08, -ph + 0.07],
-      [pw - 0.08, -ph + 0.07],
-    ].forEach(([sx, sy]) => {
-      const peg = new THREE.Mesh(standoffGeo, standoffMat);
-      peg.position.set(sx, sy, 0.004);
-      studioPlaqueGroup.add(peg);
-    });
-
-    // Mount on front wall within the left half of the wall table span (table X ∈ [-1.30, +1.30])
-    studioPlaqueGroup.position.set(-0.82, 1.52, -ROOM_DEPTH / 2);
-    roomGroup.add(studioPlaqueGroup);
-
-    // Gentle warm accent light highlighting the wooden studio plaque
-    const plaqueSpot = new THREE.PointLight(0xffeed6, 1.05, 2.8, 1.3);
-    plaqueSpot.position.set(-0.82, 1.85, -ROOM_DEPTH / 2 + 0.65);
-    roomGroup.add(plaqueSpot);
-
-    // --- 4A-3. SUZUMI SU HANGING SCROLL TAPESTRY ON FRONT WALL RIGHT END OF TABLE (正前方桌子偏右側尾端牆面掛軸) ---
+    // --- 4A-3. SUZUMI SU HANGING SCROLL TAPESTRY MOVED TO ORIGINAL WOODEN PLAQUE LOCATION (涼海紅色掛軸移至原木牌位置 X = -0.82) ---
     const suzumiScrollTexture = textureLoader.load('/assets/suzumi_scroll_tex.png');
     suzumiScrollTexture.colorSpace = THREE.SRGBColorSpace;
     suzumiScrollTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -2410,14 +2306,286 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     scroll2Pin.position.set(0, 0.148, 0.005);
     suzumiScrollGroup.add(scroll2Pin);
 
-    // Mount flush on the front wall near the right end of the wall-side table (table spans X ∈ [-1.30, +1.30])
-    suzumiScrollGroup.position.set(1.06, 2.40, -ROOM_DEPTH / 2);
+    // Mount on front wall to the right of the lobby door where the studio wooden plaque was originally placed (X = -2.54)
+    suzumiScrollGroup.position.set(-2.54, 2.35, -ROOM_DEPTH / 2);
     roomGroup.add(suzumiScrollGroup);
 
-    // Gentle warm spotlight illuminating the hanging scroll on the right side of the front wall table
+    // Gentle warm spotlight illuminating the hanging scroll
     const suzumiScrollSpot = new THREE.PointLight(0xffeed6, 1.15, 3.2, 1.25);
-    suzumiScrollSpot.position.set(1.06, 2.15, -ROOM_DEPTH / 2 + 0.72);
+    suzumiScrollSpot.position.set(-2.54, 2.10, -ROOM_DEPTH / 2 + 0.72);
     roomGroup.add(suzumiScrollSpot);
+
+    // --- 4A-4. INTERACTIVE EVENT CALENDAR ON FRONT WALL RIGHT END (活動行事曆月曆 — 擺在原涼海紅色掛軸處 X = 1.06) ---
+    const createWallCalendarTexture = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024;
+      canvas.height = 1360;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return new THREE.Texture();
+
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth();
+      const todayNum = now.getDate();
+
+      // Deep dark-navy paper page matching CubeLendar aesthetic
+      const bgGrad = ctx.createLinearGradient(0, 0, 0, 1360);
+      bgGrad.addColorStop(0, '#0a162b');
+      bgGrad.addColorStop(0.28, '#071224');
+      bgGrad.addColorStop(1, '#0b1830');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, 1024, 1360);
+
+      // Subtle pixel grid overlay
+      ctx.strokeStyle = 'rgba(135, 206, 235, 0.07)';
+      ctx.lineWidth = 1.5;
+      for (let gx = 0; gx < 1024; gx += 32) {
+        ctx.beginPath();
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, 1360);
+        ctx.stroke();
+      }
+      for (let gy = 0; gy < 1360; gy += 32) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(1024, gy);
+        ctx.stroke();
+      }
+
+      // Outer sky-blue double frame border
+      ctx.strokeStyle = 'rgba(135, 206, 235, 0.55)';
+      ctx.lineWidth = 5;
+      ctx.strokeRect(28, 34, 968, 1292);
+
+      // Header top band
+      ctx.fillStyle = 'rgba(20, 42, 78, 0.88)';
+      ctx.fillRect(32, 38, 960, 238);
+
+      // Spiral binding punch holes across very top
+      for (let h = 0; h < 11; h++) {
+        const hx = 102 + h * 82;
+        ctx.fillStyle = '#030812';
+        ctx.beginPath();
+        ctx.arc(hx, 68, 11, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#87CEEB';
+      ctx.font = 'bold 26px monospace';
+      ctx.fillText('CUBELENDAR // 紡塊像素', 70, 138);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '900 54px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.fillText('活動行事曆', 70, 204);
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#FFD700';
+      ctx.font = '900 62px monospace';
+      ctx.fillText(`${year}.${String(month + 1).padStart(2, '0')}`, 954, 198);
+
+      // Category Legend Dots Strip
+      const categories = Object.values(CATEGORY_COLORS);
+      const pillW = 128;
+      categories.forEach((cat, idx) => {
+        const px = 64 + idx * (pillW + 4);
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.fillRect(px, 294, pillW, 44);
+        ctx.fillStyle = cat.hex;
+        ctx.beginPath();
+        ctx.arc(px + 18, 316, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = 'bold 19px "PingFang TC", "Microsoft JhengHei", sans-serif';
+        ctx.fillText(cat.label, px + 32, 323);
+      });
+
+      // Weekday Headers (Mon..Sun)
+      const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+      const gridLeft = 56;
+      const gridTop = 368;
+      const cellW = 124;
+      const cellH = 122;
+      const colGap = 8;
+      const rowGap = 10;
+
+      weekdays.forEach((wd, idx) => {
+        const cx = gridLeft + idx * (cellW + colGap) + cellW / 2;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = idx >= 5 ? '#FF94B2' : '#94a3b8';
+        ctx.font = 'bold 28px "PingFang TC", "Microsoft JhengHei", sans-serif';
+        ctx.fillText(wd, cx, gridTop + 26);
+      });
+
+      // Month Grid Cells
+      const firstDay = new Date(year, month, 1);
+      let firstDow = firstDay.getDay();
+      firstDow = firstDow === 0 ? 6 : firstDow - 1;
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+      for (let cell = 0; cell < 42; cell++) {
+        const row = Math.floor(cell / 7);
+        const col = cell % 7;
+        const cx = gridLeft + col * (cellW + colGap);
+        const cy = gridTop + 52 + row * (cellH + rowGap);
+
+        const dayOffset = cell - firstDow + 1;
+        const isCurrentMonth = dayOffset >= 1 && dayOffset <= daysInMonth;
+        const dObj = new Date(year, month, dayOffset);
+        const dYear = dObj.getFullYear();
+        const dMonth = String(dObj.getMonth() + 1).padStart(2, '0');
+        const dDay = String(dObj.getDate()).padStart(2, '0');
+        const dateStr = `${dYear}-${dMonth}-${dDay}`;
+        const dayEvents = getEventsForDate(dateStr);
+        const isToday = isCurrentMonth && dayOffset === todayNum;
+
+        ctx.fillStyle = isToday
+          ? 'rgba(135, 206, 235, 0.24)'
+          : dayEvents.length > 0 && isCurrentMonth
+            ? `${CATEGORY_COLORS[dayEvents[0].category].hex}22`
+            : 'rgba(255, 255, 255, 0.035)';
+        ctx.fillRect(cx, cy, cellW, cellH);
+
+        ctx.strokeStyle = isToday
+          ? '#87CEEB'
+          : dayEvents.length > 0 && isCurrentMonth
+            ? `${CATEGORY_COLORS[dayEvents[0].category].hex}99`
+            : 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = isToday ? 3.5 : 1.5;
+        ctx.strokeRect(cx, cy, cellW, cellH);
+
+        ctx.textAlign = 'center';
+        ctx.fillStyle = isCurrentMonth
+          ? isToday
+            ? '#ffffff'
+            : dayEvents.length > 0
+              ? CATEGORY_COLORS[dayEvents[0].category].hex
+              : '#e2e8f0'
+          : 'rgba(255, 255, 255, 0.22)';
+        ctx.font = `900 ${isToday ? 38 : 34}px monospace`;
+        ctx.fillText(String(dObj.getDate()), cx + cellW / 2, cy + 56);
+
+        if (dayEvents.length > 0) {
+          const dots = dayEvents.slice(0, 3);
+          const totalW = (dots.length - 1) * 18;
+          dots.forEach((ev, di) => {
+            ctx.fillStyle = CATEGORY_COLORS[ev.category].hex;
+            ctx.beginPath();
+            ctx.arc(cx + cellW / 2 - totalW / 2 + di * 18, cy + 92, 6, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        }
+      }
+
+      // Bottom interactive callout bar
+      ctx.fillStyle = 'rgba(135, 206, 235, 0.14)';
+      ctx.fillRect(56, 1244, 912, 56);
+      ctx.strokeStyle = 'rgba(135, 206, 235, 0.45)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(56, 1244, 912, 56);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#bae6fd';
+      ctx.font = 'bold 26px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.fillText('點擊月曆查看完整活動行事曆 ↗', 512, 1281);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      return texture;
+    };
+
+    const wallCalendarTexture = createWallCalendarTexture();
+    const wallCalendarGroup = new THREE.Group();
+    const CAL_W = 0.52;
+    const CAL_H = 0.69;
+
+    // 1. Dark walnut/slate backing board slightly larger than paper stack
+    const calBackBoard = new THREE.Mesh(
+      new THREE.BoxGeometry(CAL_W + 0.036, CAL_H + 0.044, 0.012),
+      new THREE.MeshStandardMaterial({ color: 0x1c130d, roughness: 0.56, metalness: 0.08 })
+    );
+    calBackBoard.position.set(0, 0, 0.008);
+    calBackBoard.castShadow = true;
+    calBackBoard.receiveShadow = true;
+    wallCalendarGroup.add(calBackBoard);
+
+    // 2. Layered paper page stack beneath top calendar sheet
+    const calPaperStack = new THREE.Mesh(
+      new THREE.BoxGeometry(CAL_W, CAL_H, 0.009),
+      new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.85, metalness: 0.0 })
+    );
+    calPaperStack.position.set(0, -0.004, 0.018);
+    calPaperStack.castShadow = true;
+    calPaperStack.receiveShadow = true;
+    wallCalendarGroup.add(calPaperStack);
+
+    // 3. Printed front calendar sheet
+    const calFrontSheet = new THREE.Mesh(
+      new THREE.PlaneGeometry(CAL_W, CAL_H),
+      new THREE.MeshStandardMaterial({
+        map: wallCalendarTexture,
+        color: 0xffffff,
+        roughness: 0.58,
+        metalness: 0.04,
+      })
+    );
+    calFrontSheet.position.set(0, -0.004, 0.0235);
+    calFrontSheet.receiveShadow = true;
+    wallCalendarGroup.add(calFrontSheet);
+
+    // 4. Top twin-wire silver spiral rings
+    const calSpiralMat = new THREE.MeshStandardMaterial({
+      color: 0xdbe2ea,
+      roughness: 0.24,
+      metalness: 0.86,
+    });
+    const spiralRingGeo = new THREE.TorusGeometry(0.011, 0.0022, 8, 18);
+    for (let i = 0; i < 11; i++) {
+      const sx = -CAL_W / 2 + 0.038 + i * ((CAL_W - 0.076) / 10);
+      const ring = new THREE.Mesh(spiralRingGeo, calSpiralMat);
+      ring.rotation.y = Math.PI / 2;
+      ring.position.set(sx, CAL_H / 2 - 0.008, 0.022);
+      wallCalendarGroup.add(ring);
+    }
+
+    // 5. Top hanging wire & wall nail pin
+    const calCordCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-0.14, CAL_H / 2 + 0.014, 0.014),
+      new THREE.Vector3(0, CAL_H / 2 + 0.095, 0.006),
+      new THREE.Vector3(0.14, CAL_H / 2 + 0.014, 0.014),
+    ]);
+    const calCordMesh = new THREE.Mesh(
+      new THREE.TubeGeometry(calCordCurve, 18, 0.0020, 8, false),
+      calSpiralMat
+    );
+    wallCalendarGroup.add(calCordMesh);
+
+    const calNailPin = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.0036, 0.0036, 0.018, 10),
+      calSpiralMat
+    );
+    calNailPin.rotation.x = Math.PI / 2;
+    calNailPin.position.set(0, CAL_H / 2 + 0.096, 0.006);
+    wallCalendarGroup.add(calNailPin);
+
+    // 6. Invisible generous hitbox for easy tapping/clicking
+    const wallCalendarHitbox = new THREE.Mesh(
+      new THREE.BoxGeometry(CAL_W + 0.14, CAL_H + 0.16, 0.14),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    wallCalendarHitbox.name = 'wall_calendar_hitbox';
+    wallCalendarHitbox.position.set(0, 0, 0.03);
+    wallCalendarHitboxRef.current = wallCalendarHitbox;
+    wallCalendarGroup.add(wallCalendarHitbox);
+
+    wallCalendarGroup.position.set(1.06, 1.84, -ROOM_DEPTH / 2);
+    roomGroup.add(wallCalendarGroup);
+
+    // Warm accent spotlight illuminating the front-right Event Calendar
+    const wallCalendarSpot = new THREE.PointLight(0xffeed6, 1.15, 3.2, 1.25);
+    wallCalendarSpot.position.set(1.06, 2.15, -ROOM_DEPTH / 2 + 0.72);
+    roomGroup.add(wallCalendarSpot);
 
     // --- 4B. ENLARGED CIRCULAR WOODEN TEA TABLE & TABLE LAMP (放大並改為圓形木茶几，附設雅緻檯燈) ---
     const centerTeaGroup = new THREE.Group();
@@ -2991,15 +3159,123 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       scrollGroup.add(wallPin);
     });
 
-    // Mount flush on the right wall directly beside the right side of the 6-tier cabinet
-    scrollGroup.position.set(ROOM_WIDTH / 2 - 0.014, 2.46, -2.78);
-    scrollGroup.rotation.y = -Math.PI / 2;
+    // Mount green hanging flag in the center of the front wall above desk area, behind black vinyl record
+    scrollGroup.position.set(0, ROOM_HEIGHT - 0.02, -ROOM_DEPTH / 2 + 0.012);
+    scrollGroup.rotation.y = 0;
     roomGroup.add(scrollGroup);
 
-    // Warm subtle corner light gently illuminating the hanging scroll banner
-    const scrollAccentLight = new THREE.PointLight(0xffebd0, 1.35, 3.8, 1.3);
-    scrollAccentLight.position.set(ROOM_WIDTH / 2 - 0.78, 2.55, -2.60);
+    const scrollAccentLight = new THREE.PointLight(0xffebd0, 1.25, 3.8, 1.3);
+    scrollAccentLight.position.set(0, ROOM_HEIGHT - 0.35, -ROOM_DEPTH / 2 + 0.65);
     roomGroup.add(scrollAccentLight);
+
+    // Lobby Bulletin Board on right wall (原本綠掛旗的地方) - 代表最新資訊功能
+    const lobbyBulletinGroup = new THREE.Group();
+    const LOBBY_BB_W = 1.35;
+    const LOBBY_BB_H = 1.70;
+    const LOBBY_BB_BORDER = 0.044;
+    const LOBBY_BB_INNER_W = LOBBY_BB_W - LOBBY_BB_BORDER * 2;
+    const LOBBY_BB_INNER_H = LOBBY_BB_H - LOBBY_BB_BORDER * 2;
+
+    const createCherryWoodTextures = () => {
+      const cCanvas = document.createElement('canvas');
+      cCanvas.width = 1024;
+      cCanvas.height = 1024;
+      const ctx = cCanvas.getContext('2d');
+      const bCanvas = document.createElement('canvas');
+      bCanvas.width = 512;
+      bCanvas.height = 512;
+      const bCtx = bCanvas.getContext('2d');
+      if (ctx && bCtx) {
+        // 櫻花木色底 (Warm cherry wood base - 櫻花木色)
+        ctx.fillStyle = '#caa092';
+        ctx.fillRect(0, 0, 1024, 1024);
+        bCtx.fillStyle = '#808080';
+        bCtx.fillRect(0, 0, 512, 512);
+
+        const cherryPalette = [
+          '#b98172', '#d5a99c', '#c69183', '#dda799', '#bf8677', '#cfa194', '#b37869'
+        ];
+        const numPlanks = 8;
+        const plankH = 1024 / numPlanks;
+        for (let p = 0; p < numPlanks; p++) {
+          const py = p * plankH;
+          const tone = cherryPalette[p % cherryPalette.length];
+          ctx.fillStyle = tone;
+          ctx.fillRect(0, py + 1, 1024, plankH - 2);
+
+          for (let g = 0; g < 36; g++) {
+            const gy = py + (g / 36) * plankH;
+            ctx.fillStyle = g % 2 === 0 ? 'rgba(120, 58, 44, 0.16)' : 'rgba(255, 230, 220, 0.18)';
+            ctx.fillRect(0, gy, 1024, 1.5);
+            bCtx.fillStyle = g % 2 === 0 ? '#6e6e6e' : '#929292';
+            bCtx.fillRect(0, gy * 0.5, 512, 1);
+          }
+
+          for (let f = 0; f < 250; f++) {
+            const fx = Math.random() * 1024;
+            const fy = py + Math.random() * plankH;
+            const fw = 12 + Math.random() * 45;
+            ctx.fillStyle = Math.random() > 0.5 ? 'rgba(110, 50, 38, 0.12)' : 'rgba(255, 235, 225, 0.16)';
+            ctx.fillRect(fx, fy, fw, 1);
+          }
+        }
+      }
+      const colorTex = new THREE.CanvasTexture(cCanvas);
+      colorTex.colorSpace = THREE.SRGBColorSpace;
+      colorTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      extraRoomTexturesToDispose.push(colorTex);
+
+      const bumpTex = new THREE.CanvasTexture(bCanvas);
+      extraRoomTexturesToDispose.push(bumpTex);
+
+      return { colorTex, bumpTex };
+    };
+
+    const { colorTex: lobbyCherryColorTex, bumpTex: lobbyCherryBumpTex } = createCherryWoodTextures();
+
+    // 胡桃木色的框 (Walnut Wood Frame)
+    const lobbyBBFrameMat = new THREE.MeshStandardMaterial({
+      map: tabletopTexture,
+      color: 0x362013,
+      roughness: 0.52,
+      metalness: 0.04,
+    });
+    // 櫻花木色的底 (Cherry Wood Surface - 空白布告欄，無任何釘紙)
+    const lobbyBBSurfaceMat = new THREE.MeshStandardMaterial({
+      map: lobbyCherryColorTex,
+      bumpMap: lobbyCherryBumpTex,
+      bumpScale: 0.003,
+      roughness: 0.58,
+      metalness: 0.02,
+    });
+    const lobbyBBSlab = new THREE.Mesh(
+      new THREE.BoxGeometry(LOBBY_BB_INNER_W, LOBBY_BB_INNER_H, 0.012),
+      lobbyBBSurfaceMat
+    );
+    lobbyBBSlab.position.z = 0.006;
+    lobbyBBSlab.receiveShadow = true;
+    lobbyBulletinGroup.add(lobbyBBSlab);
+
+    [-1, 1].forEach((ySide) => {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(LOBBY_BB_W, LOBBY_BB_BORDER, 0.020), lobbyBBFrameMat);
+      rail.position.set(0, ySide * (LOBBY_BB_H / 2 - LOBBY_BB_BORDER / 2), 0.010);
+      lobbyBulletinGroup.add(rail);
+    });
+    [-1, 1].forEach((xSide) => {
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(LOBBY_BB_BORDER, LOBBY_BB_INNER_H, 0.020), lobbyBBFrameMat);
+      rail.position.set(xSide * (LOBBY_BB_W / 2 - LOBBY_BB_BORDER / 2), 0, 0.010);
+      lobbyBulletinGroup.add(rail);
+    });
+
+    // 預設設定成「沒有東西在上面 也不可互動」 (Blank & non-interactive)
+
+    lobbyBulletinGroup.position.set(ROOM_WIDTH / 2 - 0.016, 1.35, -2.78);
+    lobbyBulletinGroup.rotation.y = -Math.PI / 2;
+    roomGroup.add(lobbyBulletinGroup);
+
+    const lobbyBulletinAccentLight = new THREE.PointLight(0xffebd0, 1.15, 3.8, 1.3);
+    lobbyBulletinAccentLight.position.set(ROOM_WIDTH / 2 - 0.75, 1.85, -2.78);
+    roomGroup.add(lobbyBulletinAccentLight);
 
     // --- 4E. TWIN SIX-TIER DEEP DARK WOOD CABINETS (畫面右邊鏡頭底部的並排六層深木櫃) ---
     const CAB_W = 1.12;
@@ -3840,297 +4116,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
 
     scene.add(roomGroup);
 
-    // --- 4C. ENLARGED BLUE-VIOLET HANDHELD GAME CONSOLE (放大版 16:9 螢幕藍紫色掌上型遊戲機) ---
-    const createConsoleScreenTexture = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 360; // Exact 16:9 aspect ratio
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return new THREE.Texture();
-
-      // Match original desktop #001B3D dark ocean backdrop seamlessly
-      ctx.fillStyle = '#001B3D';
-      ctx.fillRect(0, 0, 640, 360);
-
-      // Subtle retro grid matching desktop landing
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-      ctx.lineWidth = 1;
-      for (let gx = 0; gx < 640; gx += 20) {
-        ctx.beginPath();
-        ctx.moveTo(gx, 0);
-        ctx.lineTo(gx, 360);
-        ctx.stroke();
-      }
-      for (let gy = 0; gy < 360; gy += 20) {
-        ctx.beginPath();
-        ctx.moveTo(0, gy);
-        ctx.lineTo(640, gy);
-        ctx.stroke();
-      }
-
-      // Scattered colorful tetris accent blocks
-      const previewBlocks = [
-        [44, 60, '#FF007F'], [96, 260, '#00E5FF'], [540, 80, '#FFD700'],
-        [560, 280, '#A855F7'], [120, 40, '#4ADE80'], [490, 220, '#F97316'],
-      ] as const;
-      previewBlocks.forEach(([bx, by, col]) => {
-        ctx.fillStyle = col;
-        ctx.fillRect(bx, by, 18, 18);
-      });
-
-      // Center title & Game Start prompt preview
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 28px sans-serif';
-      ctx.fillText('保持可愛漫研社', 320, 154);
-
-      ctx.strokeStyle = '#0077be';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(225, 200, 190, 44);
-      ctx.fillStyle = '#0077be';
-      ctx.font = 'bold 18px monospace';
-      ctx.fillText('GAME START', 320, 228);
-
-      const texture = new THREE.CanvasTexture(canvas);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      return texture;
-    };
-
-    const consoleScreenTex = createConsoleScreenTexture();
-
-    const consoleGroup = new THREE.Group();
-    const CONSOLE_W = 0.364;
-    const CONSOLE_H = 0.162;
-    const CONSOLE_R = 0.026;
-    const CONSOLE_D = 0.019;
-
-    // Rounded handheld body shape
-    const bodyShape = new THREE.Shape();
-    const hw = CONSOLE_W / 2;
-    const hh = CONSOLE_H / 2;
-    bodyShape.moveTo(-hw + CONSOLE_R, -hh);
-    bodyShape.lineTo(hw - CONSOLE_R, -hh);
-    bodyShape.quadraticCurveTo(hw, -hh, hw, -hh + CONSOLE_R);
-    bodyShape.lineTo(hw, hh - CONSOLE_R);
-    bodyShape.quadraticCurveTo(hw, hh, hw - CONSOLE_R, hh);
-    bodyShape.lineTo(-hw + CONSOLE_R, hh);
-    bodyShape.quadraticCurveTo(-hw, hh, -hw, hh - CONSOLE_R);
-    bodyShape.lineTo(-hw, -hh + CONSOLE_R);
-    bodyShape.quadraticCurveTo(-hw, -hh, -hw + CONSOLE_R, -hh);
-
-    const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, {
-      depth: CONSOLE_D,
-      bevelEnabled: true,
-      bevelThickness: 0.003,
-      bevelSize: 0.003,
-      bevelSegments: 4,
-    });
-    bodyGeo.translate(0, 0, -CONSOLE_D / 2);
-
-    // Vivid Blue-Violet Chassis Material (藍紫色機身)
-    const consoleBodyMat = new THREE.MeshStandardMaterial({
-      color: 0x5c4be8,
-      roughness: 0.34,
-      metalness: 0.18,
-      emissive: 0x1b144a,
-      emissiveIntensity: 0.30,
-    });
-    const consoleBody = new THREE.Mesh(bodyGeo, consoleBodyMat);
-    consoleBody.castShadow = true;
-    consoleBody.receiveShadow = true;
-    consoleGroup.add(consoleBody);
-
-    // Dark Slate-Indigo Bezel around Enlarged 16:9 Screen
-    const SCREEN_W = 0.256;
-    const SCREEN_H = 0.144; // Exact 16:9 ratio (0.256 / 0.144 = 16/9)
-    const bezelGeo = new THREE.BoxGeometry(SCREEN_W + 0.008, SCREEN_H + 0.008, 0.003);
-    const bezelMat = new THREE.MeshStandardMaterial({
-      color: 0x110e1c,
-      roughness: 0.18,
-      metalness: 0.25,
-    });
-    const bezelMesh = new THREE.Mesh(bezelGeo, bezelMat);
-    bezelMesh.position.set(0, 0, CONSOLE_D / 2 + 0.0026);
-    consoleGroup.add(bezelMesh);
-
-    // Self-lit 16:9 LCD/OLED Display Screen
-    const screenGeo = new THREE.PlaneGeometry(SCREEN_W, SCREEN_H);
-    const screenMat = new THREE.MeshStandardMaterial({
-      map: consoleScreenTex,
-      emissiveMap: consoleScreenTex,
-      emissive: new THREE.Color(0xffffff),
-      emissiveIntensity: 0.85,
-      roughness: 0.15,
-      metalness: 0.05,
-    });
-    const screenMesh = new THREE.Mesh(screenGeo, screenMat);
-    screenMesh.position.set(0, 0, CONSOLE_D / 2 + 0.0046);
-    consoleGroup.add(screenMesh);
-
-    // Deep Indigo Trim Material for sticks, D-pad & shoulder triggers
-    const consoleTrimMat = new THREE.MeshStandardMaterial({
-      color: 0x261f47,
-      roughness: 0.4,
-      metalness: 0.2,
-    });
-    const stickRingMat = new THREE.MeshStandardMaterial({
-      color: 0x8273ff,
-      roughness: 0.3,
-    });
-    const dpadArrowMat = new THREE.MeshBasicMaterial({ color: 0xd8b4fe });
-
-    const CTRL_X = 0.157;
-    const UPPER_CTRL_Y = 0.022;
-    const STICK_Y = -0.036;
-
-    // Left Tactile D-Pad Cross Group (controls page scroll UP / DOWN)
-    const dpadGroup = new THREE.Group();
-    const dpadRestZ = CONSOLE_D / 2 + 0.0042;
-    dpadGroup.position.set(-CTRL_X, UPPER_CTRL_Y, dpadRestZ);
-    dpadRestZRef.current = dpadRestZ;
-
-    const dpadDiscGeo = new THREE.CylinderGeometry(0.020, 0.021, 0.002, 24);
-    dpadDiscGeo.rotateX(Math.PI / 2);
-    const dpadDisc = new THREE.Mesh(
-      dpadDiscGeo,
-      new THREE.MeshStandardMaterial({ color: 0x181330, roughness: 0.5 })
-    );
-    dpadDisc.position.z = -0.0012;
-    dpadGroup.add(dpadDisc);
-
-    const dpadH = new THREE.Mesh(new THREE.BoxGeometry(0.034, 0.011, 0.0048), consoleTrimMat);
-    dpadGroup.add(dpadH);
-
-    const dpadV = new THREE.Mesh(new THREE.BoxGeometry(0.011, 0.034, 0.0048), consoleTrimMat);
-    dpadGroup.add(dpadV);
-
-    // Subtle ▲ / ▼ directional pips on D-Pad vertical arms
-    const arrowGeo = new THREE.ConeGeometry(0.0032, 0.0048, 3);
-    const arrowUp = new THREE.Mesh(arrowGeo, dpadArrowMat);
-    arrowUp.position.set(0, 0.0125, 0.0028);
-    dpadGroup.add(arrowUp);
-
-    const arrowDown = new THREE.Mesh(arrowGeo, dpadArrowMat);
-    arrowDown.rotation.z = Math.PI;
-    arrowDown.position.set(0, -0.0125, 0.0028);
-    dpadGroup.add(arrowDown);
-
-    dpadGroupRef.current = dpadGroup;
-    consoleGroup.add(dpadGroup);
-
-    // Generous invisible touch hitboxes for D-Pad UP & DOWN
-    const dpadUpHitbox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.048, 0.042, 0.030),
-      new THREE.MeshBasicMaterial({ visible: false })
-    );
-    dpadUpHitbox.position.set(-CTRL_X, UPPER_CTRL_Y + 0.021, CONSOLE_D / 2 + 0.006);
-    dpadUpHitbox.name = 'dpad_up_hitbox';
-    dpadUpHitboxRef.current = dpadUpHitbox;
-    consoleGroup.add(dpadUpHitbox);
-
-    const dpadDownHitbox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.048, 0.042, 0.030),
-      new THREE.MeshBasicMaterial({ visible: false })
-    );
-    dpadDownHitbox.position.set(-CTRL_X, UPPER_CTRL_Y - 0.021, CONSOLE_D / 2 + 0.006);
-    dpadDownHitbox.name = 'dpad_down_hitbox';
-    dpadDownHitboxRef.current = dpadDownHitbox;
-    consoleGroup.add(dpadDownHitbox);
-
-    // Left & Right Analog Thumbsticks
-    const stickGeo = new THREE.CylinderGeometry(0.0115, 0.0115, 0.0055, 18);
-    stickGeo.rotateX(Math.PI / 2);
-    const ringGeo = new THREE.TorusGeometry(0.0124, 0.0016, 10, 20);
-
-    const leftStick = new THREE.Mesh(stickGeo, consoleTrimMat);
-    leftStick.position.set(-CTRL_X, STICK_Y, CONSOLE_D / 2 + 0.0044);
-    consoleGroup.add(leftStick);
-
-    const leftRing = new THREE.Mesh(ringGeo, stickRingMat);
-    leftRing.position.set(-CTRL_X, STICK_Y, CONSOLE_D / 2 + 0.003);
-    consoleGroup.add(leftRing);
-
-    const rightStick = new THREE.Mesh(stickGeo, consoleTrimMat);
-    rightStick.position.set(CTRL_X, STICK_Y, CONSOLE_D / 2 + 0.0044);
-    consoleGroup.add(rightStick);
-
-    const rightRing = new THREE.Mesh(ringGeo, stickRingMat);
-    rightRing.position.set(CTRL_X, STICK_Y, CONSOLE_D / 2 + 0.003);
-    consoleGroup.add(rightRing);
-
-    // Right 4 Face Buttons (ABXY - tapping any pulls the hemp rope)
-    const btnGeo = new THREE.CylinderGeometry(0.0066, 0.0066, 0.0048, 16);
-    btnGeo.rotateX(Math.PI / 2);
-    const btnRestZ = CONSOLE_D / 2 + 0.0044;
-    faceButtonRestZRef.current = btnRestZ;
-    faceButtonMeshesRef.current = [];
-    const faceButtons = [
-      { dx: 0, dy: 0.0145, color: 0x93c5fd },   // X
-      { dx: 0, dy: -0.0145, color: 0xfde68a },  // B
-      { dx: -0.0145, dy: 0, color: 0xc4b5fd },  // Y
-      { dx: 0.0145, dy: 0, color: 0xf472b6 },   // A
-    ];
-    faceButtons.forEach((b, idx) => {
-      const btn = new THREE.Mesh(
-        btnGeo,
-        new THREE.MeshStandardMaterial({ color: b.color, roughness: 0.28, emissive: b.color, emissiveIntensity: 0.28 })
-      );
-      btn.position.set(CTRL_X + b.dx, UPPER_CTRL_Y + b.dy, btnRestZ);
-      btn.name = `abxy_btn_${idx}`;
-      faceButtonMeshesRef.current.push(btn);
-      consoleGroup.add(btn);
-    });
-
-    // Generous invisible touch hitbox covering all 4 right-side ABXY buttons
-    const abxyHitbox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.052, 0.068, 0.030),
-      new THREE.MeshBasicMaterial({ visible: false })
-    );
-    abxyHitbox.position.set(CTRL_X, UPPER_CTRL_Y, CONSOLE_D / 2 + 0.006);
-    abxyHitbox.name = 'abxy_hitbox';
-    abxyHitboxRef.current = abxyHitbox;
-    consoleGroup.add(abxyHitbox);
-
-    // Power LED Indicator
-    const ledMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.003, 10, 10),
-      new THREE.MeshBasicMaterial({ color: 0x6ee7b7 })
-    );
-    ledMesh.position.set(0.145, 0.064, CONSOLE_D / 2 + 0.0032);
-    consoleGroup.add(ledMesh);
-
-    // Shoulder Triggers L & R along top edge
-    const shoulderGeo = new THREE.BoxGeometry(0.056, 0.010, 0.014);
-    const shoulderL = new THREE.Mesh(shoulderGeo, consoleTrimMat);
-    shoulderL.position.set(-0.132, hh + 0.001, 0);
-    consoleGroup.add(shoulderL);
-
-    const shoulderR = new THREE.Mesh(shoulderGeo, consoleTrimMat);
-    shoulderR.position.set(0.132, hh + 0.001, 0);
-    consoleGroup.add(shoulderR);
-
-    // Dedicated invisible interaction hitbox for easy mobile tap/click when on table
-    const consoleHitbox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.42, 0.22, 0.09),
-      new THREE.MeshBasicMaterial({ visible: false })
-    );
-    consoleHitbox.name = 'console_hitbox';
-    consoleGroup.add(consoleHitbox);
-
-    // Resting world pose on the round wooden tea table (south-west front of table)
-    const consoleTablePos = new THREE.Vector3(-0.20, TEA_TABLE_HEIGHT + 0.015, 0.36);
-    const consoleTableQuat = new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(-Math.PI / 2, 0.20, 0, 'YXZ')
-    );
-
-    consoleGroup.position.copy(consoleTablePos);
-    consoleGroup.quaternion.copy(consoleTableQuat);
-    consoleGroup.scale.setScalar(1.0);
-
-    consoleGroupRef.current = consoleGroup;
-    consoleSceneRef.current = consoleGroup;
-    scene.add(consoleGroup);
-
     // --- 5. WARM LIGHTING RIG (MAIN LOBBY ROOM) ---
     const ambientLight = new THREE.AmbientLight(0xffecd6, 0.95);
     ambientLightRef.current = ambientLight;
@@ -4203,7 +4188,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     const PR_SIZE = 7.0;
     const PR_HEIGHT = 3.0;
     const PR_CENTER_X = -1.5; // -5.0 + 7.0 / 2
-    const extraRoomTexturesToDispose: THREE.Texture[] = [];
 
     const EXTRA_ROOM_THEMES: Record<
       'purple' | 'green' | 'gold' | 'pink',
@@ -6734,399 +6718,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
           metalness: 0.55,
         });
 
-        // Shared factory for the 3 Detailed Suzumi Su Acrylic Standees (壓克力立牌×3)
-        const loadAcrylicTex = (url: string) => {
-          const t = textureLoader.load(url);
-          t.colorSpace = THREE.SRGBColorSpace;
-          t.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          extraRoomTexturesToDispose.push(t);
-          return t;
-        };
 
-        const acryFavTex = loadAcrylicTex('/assets/acry_su_favidol.png');
-        const acryBegTex = loadAcrylicTex('/assets/acry_su_beginning.png');
-        const acryBegNameTex = loadAcrylicTex('/assets/acry_su_beginning_name.png');
-        const acryWatTex = loadAcrylicTex('/assets/acry_su_watashi.png');
-        const acryWatCrestTex = loadAcrylicTex('/assets/acry_su_watashi_crest.png');
-
-        const clearAcrylicSlabMat = new THREE.MeshPhysicalMaterial({
-          color: 0x93c5fd,
-          roughness: 0.04,
-          metalness: 0.02,
-          clearcoat: 1.0,
-          clearcoatRoughness: 0.04,
-          reflectivity: 0.96,
-          envMapIntensity: 1.55,
-          transparent: true,
-          opacity: 0.48,
-          depthWrite: false,
-        });
-        const acrylicRimLineMat = new THREE.MeshPhysicalMaterial({
-          color: 0xffffff,
-          roughness: 0.08,
-          metalness: 0.04,
-          clearcoat: 1.0,
-          clearcoatRoughness: 0.05,
-          envMapIntensity: 1.40,
-          transparent: true,
-          opacity: 0.56,
-          depthWrite: false,
-        });
-        const acrylicSlotMat = new THREE.MeshStandardMaterial({
-          color: 0x94b8d0,
-          roughness: 0.32,
-          metalness: 0.06,
-          envMapIntensity: 0.85,
-        });
-
-        const buildAcrylicPlate = (
-          tex: THREE.Texture,
-          plateW: number,
-          plateH: number,
-          silhouettePts: [number, number][],
-          hasTopTab = false
-        ) => {
-          const grp = new THREE.Group();
-          const SLAB_D = 0.0028;
-
-          const dieShape = new THREE.Shape();
-          silhouettePts.forEach(([nx, ny], idx) => {
-            const px = (nx - 0.5) * plateW;
-            const py = ny * plateH + 0.001;
-            if (idx === 0) dieShape.moveTo(px, py);
-            else dieShape.lineTo(px, py);
-          });
-          dieShape.closePath();
-
-          const dieExtGeo = new THREE.ExtrudeGeometry(dieShape, {
-            depth: SLAB_D,
-            bevelEnabled: true,
-            bevelThickness: 0.0005,
-            bevelSize: 0.0018,
-            bevelSegments: 2,
-            curveSegments: 8,
-          });
-          dieExtGeo.translate(0, 0, -SLAB_D / 2);
-
-          const dieClearMesh = new THREE.Mesh(dieExtGeo, clearAcrylicSlabMat);
-          dieClearMesh.renderOrder = 2;
-          grp.add(dieClearMesh);
-
-          if (hasTopTab) {
-            const topRing = new THREE.Mesh(
-              new THREE.TorusGeometry(0.0044, 0.0015, 8, 18),
-              acrylicRimLineMat
-            );
-            topRing.position.set(0, plateH + 0.0052, 0);
-            topRing.renderOrder = 2;
-            grp.add(topRing);
-          }
-
-          const plugPeg = new THREE.Mesh(
-            new THREE.BoxGeometry(Math.min(0.020, plateW * 0.42), 0.005, SLAB_D + 0.0006),
-            clearAcrylicSlabMat
-          );
-          plugPeg.position.set(0, -0.001, 0);
-          grp.add(plugPeg);
-
-          const frontMat = new THREE.MeshPhysicalMaterial({
-            map: tex,
-            transparent: true,
-            alphaTest: 0.25,
-            roughness: 0.14,
-            metalness: 0.01,
-            clearcoat: 0.88,
-            clearcoatRoughness: 0.07,
-            reflectivity: 0.92,
-            envMapIntensity: 1.25,
-            side: THREE.FrontSide,
-          });
-          const frontMesh = new THREE.Mesh(new THREE.PlaneGeometry(plateW, plateH), frontMat);
-          frontMesh.position.set(0, plateH / 2 + 0.001, SLAB_D / 2 + 0.0007);
-          frontMesh.castShadow = true;
-          grp.add(frontMesh);
-
-          const backMat = new THREE.MeshStandardMaterial({
-            map: tex,
-            color: 0xf4f7fb,
-            emissive: 0xdbe6f2,
-            emissiveIntensity: 0.22,
-            transparent: true,
-            alphaTest: 0.25,
-            roughness: 0.46,
-            metalness: 0.02,
-            envMapIntensity: 0.65,
-            side: THREE.FrontSide,
-          });
-          const backMesh = new THREE.Mesh(new THREE.PlaneGeometry(plateW, plateH), backMat);
-          backMesh.rotation.y = Math.PI;
-          backMesh.position.set(0, plateH / 2 + 0.001, -SLAB_D / 2 - 0.0007);
-          grp.add(backMesh);
-
-          return grp;
-        };
-
-        const createHexFavBaseTex = () => {
-          const c = document.createElement('canvas');
-          c.width = 512; c.height = 512;
-          const ctx = c.getContext('2d');
-          if (ctx) {
-            const g = ctx.createLinearGradient(0, 0, 512, 512);
-            g.addColorStop(0, '#c8ecfa');
-            g.addColorStop(0.55, '#aee0f7');
-            g.addColorStop(1, '#9cd5f2');
-            ctx.fillStyle = g;
-            ctx.fillRect(0, 0, 512, 512);
-            ctx.strokeStyle = '#1f2937';
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            for (let i = 0; i < 6; i++) {
-              const a = (i * Math.PI) / 3;
-              const px = 256 + Math.cos(a) * 224;
-              const py = 256 + Math.sin(a) * 224;
-              if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-            }
-            ctx.closePath();
-            ctx.stroke();
-            ctx.fillStyle = '#c4c7ec';
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            ctx.moveTo(175, 145); ctx.lineTo(337, 145);
-            ctx.lineTo(337, 250); ctx.lineTo(256, 305); ctx.lineTo(175, 250);
-            ctx.closePath();
-            ctx.fill(); ctx.stroke();
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 46px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('FAV', 256, 212);
-            ctx.fillText('IDOL', 256, 256);
-            ctx.fillStyle = '#d92882';
-            ctx.fillRect(156, 278, 200, 26);
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 28px sans-serif';
-            ctx.fillText('高嶺のなでしこ', 256, 362);
-            ctx.font = 'bold 34px sans-serif';
-            ctx.fillText('Suzumi Su', 256, 405);
-          }
-          const tex = new THREE.CanvasTexture(c);
-          tex.colorSpace = THREE.SRGBColorSpace;
-          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          extraRoomTexturesToDispose.push(tex);
-          return tex;
-        };
-
-        const createBeginningBaseTex = () => {
-          const c = document.createElement('canvas');
-          c.width = 512; c.height = 512;
-          const ctx = c.getContext('2d');
-          if (ctx) {
-            const g = ctx.createLinearGradient(0, 0, 0, 512);
-            g.addColorStop(0, '#c6e8f8');
-            g.addColorStop(0.45, '#f2f7fb');
-            g.addColorStop(1, '#ffffff');
-            ctx.fillStyle = g;
-            ctx.fillRect(0, 0, 512, 512);
-            ctx.strokeStyle = 'rgba(148, 195, 224, 0.28)';
-            ctx.lineWidth = 2;
-            for (let p = 0; p <= 512; p += 32) {
-              ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, 512); ctx.stroke();
-              ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(512, p); ctx.stroke();
-            }
-            ctx.strokeStyle = 'rgba(130, 198, 236, 0.55)';
-            ctx.lineWidth = 10;
-            ctx.beginPath(); ctx.arc(325, 195, 95, 0, Math.PI * 2); ctx.stroke();
-            ctx.beginPath(); ctx.arc(325, 195, 42, 0, Math.PI * 2); ctx.stroke();
-            ctx.fillStyle = '#cf9e98';
-            ctx.font = 'italic 68px serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('Beginning', 256, 412);
-            ctx.fillStyle = '#a8928c';
-            ctx.font = 'bold 22px sans-serif';
-            ctx.fillText('高嶺のなでしこ', 310, 444);
-          }
-          const tex = new THREE.CanvasTexture(c);
-          tex.colorSpace = THREE.SRGBColorSpace;
-          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          extraRoomTexturesToDispose.push(tex);
-          return tex;
-        };
-
-        const createWatashiBaseTex = () => {
-          const c = document.createElement('canvas');
-          c.width = 512; c.height = 512;
-          const ctx = c.getContext('2d');
-          if (ctx) {
-            const g = ctx.createRadialGradient(256, 256, 30, 256, 256, 270);
-            g.addColorStop(0, '#89c9ee');
-            g.addColorStop(0.76, '#76bde7');
-            g.addColorStop(0.84, '#f5c7dc');
-            g.addColorStop(1, '#a9daf5');
-            ctx.fillStyle = g;
-            ctx.fillRect(0, 0, 512, 512);
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 6;
-            ctx.beginPath();
-            ctx.moveTo(105, 315); ctx.bezierCurveTo(185, 275, 325, 275, 405, 315);
-            ctx.stroke();
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 20px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('2024', 355, 286);
-            ctx.font = 'bold 34px serif';
-            ctx.fillText('わたし色に染まれ', 256, 336);
-            ctx.fillStyle = '#f8c5dc';
-            ctx.strokeStyle = '#4f92be';
-            ctx.lineWidth = 5;
-            ctx.beginPath();
-            ctx.moveTo(256, 420); ctx.lineTo(190, 392); ctx.lineTo(180, 442); ctx.closePath();
-            ctx.fill(); ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(256, 420); ctx.lineTo(322, 392); ctx.lineTo(332, 442); ctx.closePath();
-            ctx.fill(); ctx.stroke();
-            ctx.beginPath(); ctx.arc(256, 418, 16, 0, Math.PI * 2);
-            ctx.fill(); ctx.stroke();
-          }
-          const tex = new THREE.CanvasTexture(c);
-          tex.colorSpace = THREE.SRGBColorSpace;
-          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-          extraRoomTexturesToDispose.push(tex);
-          return tex;
-        };
-
-        const STAND_BASE_H = 0.0045;
-        const makeStandBaseGroup = (shape: THREE.Shape, baseTex: THREE.Texture, radiusX: number, radiusZ: number) => {
-          const bGrp = new THREE.Group();
-          const extGeo = new THREE.ExtrudeGeometry(shape, {
-            depth: STAND_BASE_H,
-            bevelEnabled: true,
-            bevelThickness: 0.0008,
-            bevelSize: 0.0008,
-            bevelSegments: 2,
-            curveSegments: 16,
-          });
-          extGeo.rotateX(-Math.PI / 2);
-
-          const clearSlab = new THREE.Mesh(extGeo, clearAcrylicSlabMat);
-          clearSlab.position.y = 0.0008;
-          clearSlab.castShadow = true;
-          clearSlab.receiveShadow = true;
-          bGrp.add(clearSlab);
-
-          const topCapGeo = new THREE.ShapeGeometry(shape, 18);
-          topCapGeo.rotateX(-Math.PI / 2);
-          const posAttr = topCapGeo.attributes.position;
-          const uvAttr = topCapGeo.attributes.uv;
-          for (let i = 0; i < posAttr.count; i++) {
-            const vx = posAttr.getX(i);
-            const vz = posAttr.getZ(i);
-            uvAttr.setXY(i, (vx / (radiusX * 2)) + 0.5, 0.5 - (vz / (radiusZ * 2)));
-          }
-          uvAttr.needsUpdate = true;
-
-          const topCap = new THREE.Mesh(
-            topCapGeo,
-            new THREE.MeshPhysicalMaterial({
-              map: baseTex,
-              roughness: 0.14,
-              metalness: 0.01,
-              clearcoat: 0.94,
-              clearcoatRoughness: 0.06,
-              reflectivity: 0.92,
-              envMapIntensity: 1.25,
-            })
-          );
-          topCap.position.y = STAND_BASE_H + 0.0017;
-          topCap.receiveShadow = true;
-          bGrp.add(topCap);
-
-          return bGrp;
-        };
-
-        // Helper constructing all 3 Enlarged Suzumi Su Acrylic Standees for capsule inner shelf
-        const addSuzumiStandeesToGroup = (
-          parentGroup: THREE.Group,
-          basePos: [number, number, number][],
-          rotsY: [number, number, number],
-          standScale: number
-        ) => {
-          // --- Stand #1: Pink Tracksuit "FAV IDOL" Suzumi Su ---
-          const stand1Group = new THREE.Group();
-          stand1Group.position.set(...basePos[0]);
-          stand1Group.rotation.y = rotsY[0];
-          stand1Group.scale.setScalar(standScale);
-
-          const hexShape = new THREE.Shape();
-          const HEX_R = 0.039;
-          for (let i = 0; i < 6; i++) {
-            const ang = (i * Math.PI) / 3;
-            const hx = Math.cos(ang) * HEX_R;
-            const hy = Math.sin(ang) * HEX_R * 0.86;
-            if (i === 0) hexShape.moveTo(hx, hy);
-            else hexShape.lineTo(hx, hy);
-          }
-          hexShape.closePath();
-          stand1Group.add(makeStandBaseGroup(hexShape, createHexFavBaseTex(), HEX_R, HEX_R * 0.86));
-
-          const slot1 = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.0014, 0.0042), acrylicSlotMat);
-          slot1.position.set(0, STAND_BASE_H + 0.0015, 0.002);
-          stand1Group.add(slot1);
-
-          const plate1 = buildAcrylicPlate(acryFavTex, 0.058, 0.151, [
-            [0.02, 0.99], [0.10, 0.99], [0.32, 0.81], [0.46, 0.87], [0.64, 0.87],
-            [0.75, 0.76], [0.95, 0.62], [0.80, 0.54], [0.76, 0.36], [0.96, 0.02],
-            [0.76, 0.01], [0.50, 0.32], [0.39, 0.01], [0.23, 0.01], [0.24, 0.44],
-            [0.32, 0.66], [0.20, 0.78]
-          ], false);
-          plate1.position.set(0, STAND_BASE_H + 0.001, 0.002);
-          stand1Group.add(plate1);
-          parentGroup.add(stand1Group);
-
-          // --- Stand #2: Idol Dress "わたし色に染まれ" Suzumi Su + Crest ---
-          const stand3Group = new THREE.Group();
-          stand3Group.position.set(...basePos[1]);
-          stand3Group.rotation.y = rotsY[1];
-          stand3Group.scale.setScalar(standScale);
-
-          const FL_RX = 0.044;
-          const FL_RZ = 0.036;
-          const flowerShape = new THREE.Shape();
-          const FL_SEGS = 64;
-          for (let i = 0; i <= FL_SEGS; i++) {
-            const t = (i / FL_SEGS) * Math.PI * 2;
-            const scallop = 1.0 + 0.11 * Math.cos(t * 8.0);
-            const fx = Math.cos(t) * FL_RX * scallop;
-            const fy = Math.sin(t) * FL_RZ * scallop;
-            if (i === 0) flowerShape.moveTo(fx, fy);
-            else flowerShape.lineTo(fx, fy);
-          }
-          flowerShape.closePath();
-          stand3Group.add(makeStandBaseGroup(flowerShape, createWatashiBaseTex(), FL_RX * 1.12, FL_RZ * 1.12));
-
-          const slot3Back = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.0014, 0.0042), acrylicSlotMat);
-          slot3Back.position.set(0.006, STAND_BASE_H + 0.0015, -0.006);
-          stand3Group.add(slot3Back);
-
-          const slot3Front = new THREE.Mesh(new THREE.BoxGeometry(0.020, 0.0014, 0.0042), acrylicSlotMat);
-          slot3Front.position.set(-0.012, STAND_BASE_H + 0.0015, 0.013);
-          stand3Group.add(slot3Front);
-
-          const plate3 = buildAcrylicPlate(acryWatTex, 0.058, 0.146, [
-            [0.52, 0.99], [0.68, 0.94], [0.68, 0.82], [0.96, 0.72], [0.95, 0.56],
-            [0.98, 0.33], [0.68, 0.30], [0.62, 0.02], [0.35, 0.02], [0.32, 0.30],
-            [0.02, 0.33], [0.06, 0.58], [0.08, 0.75], [0.36, 0.82], [0.36, 0.94]
-          ], true);
-          plate3.position.set(0.006, STAND_BASE_H + 0.001, -0.006);
-          stand3Group.add(plate3);
-
-          const plate3Crest = buildAcrylicPlate(acryWatCrestTex, 0.062, 0.055, [
-            [0.48, 0.99], [0.64, 0.82], [0.92, 0.52], [0.98, 0.22], [0.96, 0.04],
-            [0.50, 0.02], [0.04, 0.04], [0.02, 0.22], [0.08, 0.52], [0.36, 0.82]
-          ], true);
-          plate3Crest.position.set(-0.012, STAND_BASE_H + 0.001, 0.013);
-          stand3Group.add(plate3Crest);
-          parentGroup.add(stand3Group);
-        };
 
         for (let tier = 1; tier <= 3; tier++) {
           const shelfY = SHELF_H + tier * WALL_SHELF_STEP;
@@ -7218,6 +6810,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
               const easelGroup = new THREE.Group();
               easelGroup.position.set(posX, LEDGE_TOP_Y, 0.025);
               easelGroup.rotation.y = rotY;
+              easelGroup.scale.setScalar(1.22); // 稍微放大卡片立架的尺寸
 
               const easelFrontFrame = new THREE.Group();
               easelFrontFrame.rotation.x = EASEL_TILT;
@@ -8957,19 +8550,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
 
             podGroup.add(capsulePhotoFrameGroup);
 
-            // 2. Three Enlarged Suzumi Su Acrylic Standees on Inner Capsule Shelf (移至膠囊艙內架子並放大之涼海立牌×3)
-            addSuzumiStandeesToGroup(
-              podGroup,
-              [
-                [-0.482, SHELF_TOP_Y, 0.64],
-                [-0.482, SHELF_TOP_Y, 0.41],
-                [-0.482, SHELF_TOP_Y, 0.18],
-              ],
-              [Math.PI / 2 - 0.16, Math.PI / 2 - 0.20, Math.PI / 2 - 0.24],
-              1.15
-            );
-
-            // 3. Uchiwa Support Fan mounted on Interior Capsule Side Wall near Doorway (膠囊艙內稍微靠門口側牆面的推扇)
+            // 2. Uchiwa Support Fan mounted on Interior Capsule Side Wall near Doorway (膠囊艙內稍微靠門口側牆面的推扇)
             uchiwaFanGroup.scale.setScalar(1.16);
             uchiwaFanGroup.position.set(-POD_W / 2 + wallT + 0.008, 0.80, -0.92);
             uchiwaFanGroup.rotation.y = Math.PI / 2;
@@ -9141,17 +8722,193 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         oakSideBoard.receiveShadow = true;
         capsuleStackGroup.add(oakSideBoard);
 
-        // Exterior A4 Poster (210×297 mm) mounted on Outer +X Face of White-Oak Partition (膠囊艙外側面木隔的 A4 海報)
+        // Large Cork Bulletin Board (軟木佈告欄) on Outer +X Face of White-Oak Partition — light wood frame & light blue surface
+        const CORK_OUTER_W = 2.72; // width
+        const CORK_OUTER_H = 2.08; // height
+        const CORK_BORDER = 0.044;
+        const CORK_INNER_W = CORK_OUTER_W - CORK_BORDER * 2;
+        const CORK_INNER_H = CORK_OUTER_H - CORK_BORDER * 2;
+
+        const createKraftMonologueTexture = () => {
+          const kc = document.createElement('canvas');
+          kc.width = 512;
+          kc.height = 700;
+          const kctx = kc.getContext('2d');
+          if (kctx) {
+            kctx.fillStyle = '#f5e6cb';
+            kctx.fillRect(0, 0, 512, 700);
+            for (let i = 0; i < 2000; i++) {
+              const x = (Math.sin(i * 13.5) * 0.5 + 0.5) * 512;
+              const y = (Math.cos(i * 19.7) * 0.5 + 0.5) * 700;
+              kctx.fillStyle = i % 2 === 0 ? 'rgba(180, 140, 100, 0.15)' : 'rgba(255, 255, 255, 0.2)';
+              kctx.fillRect(x, y, 2 + (i % 3), 1);
+            }
+            kctx.fillStyle = '#452b14';
+            kctx.font = 'bold 36px sans-serif';
+            kctx.fillText('阿璃的獨白', 48, 72);
+            kctx.font = '22px sans-serif';
+            const lines = [
+              '「……如果記憶也有形體，',
+              '那麼它大概會像這間工作室一樣，',
+              '被時間和光影細緻地包覆。',
+              '',
+              '每一張卡片、每一本書、每一杯溫茶，',
+              '都是不願遺忘的證明。',
+              '即使世界一直在流轉，',
+              '這裡依舊為你保留了一方溫柔。」',
+            ];
+            let startY = 130;
+            lines.forEach((line) => {
+              kctx.fillText(line, 48, startY);
+              startY += 38;
+            });
+          }
+          const tex = new THREE.CanvasTexture(kc);
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+          extraRoomTexturesToDispose.push(tex);
+          return tex;
+        };
+
         const oakPosterTex = textureLoader.load('/assets/capsule_oak_poster.png');
         oakPosterTex.colorSpace = THREE.SRGBColorSpace;
         oakPosterTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
         extraRoomTexturesToDispose.push(oakPosterTex);
 
-        const OAK_POSTER_W = 0.210;
-        const OAK_POSTER_H = 0.297;
+        const corkColorCanvas = document.createElement('canvas');
+        corkColorCanvas.width = 1024;
+        corkColorCanvas.height = 768;
+        const corkCtx = corkColorCanvas.getContext('2d');
+
+        const corkBumpCanvas = document.createElement('canvas');
+        corkBumpCanvas.width = 512;
+        corkBumpCanvas.height = 384;
+        const corkBCtx = corkBumpCanvas.getContext('2d');
+
+        if (corkCtx && corkBCtx) {
+          // 淺藍色底面 (Soft light blue bulletin board surface)
+          corkCtx.fillStyle = '#dbeafe';
+          corkCtx.fillRect(0, 0, 1024, 768);
+          corkBCtx.fillStyle = '#808080';
+          corkBCtx.fillRect(0, 0, 512, 384);
+
+          const corkPalette = [
+            'rgba(191, 219, 254, 0.55)',
+            'rgba(219, 234, 254, 0.48)',
+            'rgba(147, 197, 253, 0.40)',
+            'rgba(224, 242, 254, 0.50)',
+            'rgba(255, 255, 255, 0.35)',
+          ];
+          for (let i = 0; i < 9000; i++) {
+            const cx = ((Math.sin(i * 17.13) * 0.5 + 0.5) * 1024);
+            const cy = ((Math.cos(i * 29.71) * 0.5 + 0.5) * 768);
+            const cw = 4 + (i % 6);
+            const ch = 3 + ((i * 3) % 5);
+            corkCtx.fillStyle = corkPalette[i % corkPalette.length];
+            corkCtx.fillRect(cx, cy, cw, ch);
+
+            corkBCtx.fillStyle = i % 2 === 0 ? '#b0b0b0' : '#707070';
+            corkBCtx.fillRect(cx * 0.5, cy * 0.5, cw * 0.5, ch * 0.5);
+          }
+
+          // Subtle recessed shadow around inner cork perimeter
+          const edgeShadow = corkCtx.createLinearGradient(0, 0, 0, 42);
+          edgeShadow.addColorStop(0, 'rgba(30, 58, 138, 0.18)');
+          edgeShadow.addColorStop(1, 'rgba(30, 58, 138, 0)');
+          corkCtx.fillStyle = edgeShadow;
+          corkCtx.fillRect(0, 0, 1024, 42);
+        }
+
+        const corkColorTex = new THREE.CanvasTexture(corkColorCanvas);
+        corkColorTex.colorSpace = THREE.SRGBColorSpace;
+        corkColorTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        extraRoomTexturesToDispose.push(corkColorTex);
+
+        const corkBumpTex = new THREE.CanvasTexture(corkBumpCanvas);
+        extraRoomTexturesToDispose.push(corkBumpTex);
+
+        const corkboardGroup = new THREE.Group();
+        // 佈告欄下邊改為離地25公分 (0.25m). Corkboard center Y = 0.25 + CORK_OUTER_H / 2 = 0.25 + 1.04 = 1.29
+        corkboardGroup.position.set(POD_W / 2 - 0.002 + 0.013, 0.25 + CORK_OUTER_H / 2, 0.012);
+        corkboardGroup.rotation.y = Math.PI / 2;
+
+        const corkFrameWoodMat = new THREE.MeshStandardMaterial({
+          map: lightWoodBaseTex,
+          color: 0xf5eedc, // 淺白木色框 (Soft light whitish wood frame)
+          roughness: 0.56,
+          metalness: 0.04,
+          envMapIntensity: 0.55,
+        });
+        const corkSurfaceMat = new THREE.MeshStandardMaterial({
+          map: corkColorTex,
+          bumpMap: corkBumpTex,
+          bumpScale: 0.005,
+          roughness: 0.90,
+          metalness: 0.0,
+          envMapIntensity: 0.32,
+        });
+
+        // Cork inner slab
+        const corkBoardSlab = new THREE.Mesh(
+          new THREE.BoxGeometry(CORK_INNER_W, CORK_INNER_H, 0.012),
+          corkSurfaceMat
+        );
+        corkBoardSlab.position.z = 0.006;
+        corkBoardSlab.receiveShadow = true;
+        corkboardGroup.add(corkBoardSlab);
+
+        // 4 Beveled Wooden Frame Rails around the Corkboard
+        const frameTopBotGeo = new THREE.BoxGeometry(CORK_OUTER_W, CORK_BORDER, 0.020);
+        [-1, 1].forEach((ySide) => {
+          const rail = new THREE.Mesh(frameTopBotGeo, corkFrameWoodMat);
+          rail.position.set(0, ySide * (CORK_OUTER_H / 2 - CORK_BORDER / 2), 0.010);
+          rail.castShadow = true;
+          rail.receiveShadow = true;
+          corkboardGroup.add(rail);
+        });
+        const frameSideGeo = new THREE.BoxGeometry(CORK_BORDER, CORK_INNER_H, 0.020);
+        [-1, 1].forEach((xSide) => {
+          const rail = new THREE.Mesh(frameSideGeo, corkFrameWoodMat);
+          rail.position.set(xSide * (CORK_OUTER_W / 2 - CORK_BORDER / 2), 0, 0.010);
+          rail.castShadow = true;
+          rail.receiveShadow = true;
+          corkboardGroup.add(rail);
+        });
+
+        // Pushpin helper for items pinned on the corkboard
+        const createPushPin = (colorHex: number) => {
+          const pinGrp = new THREE.Group();
+          const pinMat = new THREE.MeshPhysicalMaterial({
+            color: colorHex,
+            roughness: 0.28,
+            metalness: 0.12,
+            clearcoat: 0.6,
+          });
+          const head = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.005, 0.008, 12), pinMat);
+          head.rotation.x = Math.PI / 2;
+          head.position.z = 0.009;
+          pinGrp.add(head);
+          const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.004, 12), pinMat);
+          cap.rotation.x = Math.PI / 2;
+          cap.position.z = 0.013;
+          pinGrp.add(cap);
+          const needle = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.0012, 0.0012, 0.008, 8),
+            new THREE.MeshStandardMaterial({ color: 0xd1d5db, metalness: 0.85, roughness: 0.2 })
+          );
+          needle.rotation.x = Math.PI / 2;
+          needle.position.z = 0.004;
+          pinGrp.add(needle);
+          return pinGrp;
+        };
+
+        // 1. Exterior A3 Poster (297×420 mm) — 向左傾斜5度 (rotation.z = +0.087 rad) 移到牛皮紙右下角並稍微覆蓋
+        const OAK_POSTER_W = 0.297; // A3 width
+        const OAK_POSTER_H = 0.420; // A3 height
         const oakPosterGroup = new THREE.Group();
-        oakPosterGroup.position.set(POD_W / 2 - 0.002 + 0.013 + 0.0014, 1.54, -0.32);
-        oakPosterGroup.rotation.y = Math.PI / 2;
+        // 30MS說明書海報移到牛皮紙右下角並在前面覆蓋部分角落
+        oakPosterGroup.position.set(-0.50, 0.28, 0.023);
+        oakPosterGroup.rotation.z = 0.087; // 向左傾斜5度 (+5 deg)
 
         const oakPosterMat = new THREE.MeshPhysicalMaterial({
           map: oakPosterTex,
@@ -9168,24 +8925,104 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         oakPosterMesh.receiveShadow = true;
         oakPosterGroup.add(oakPosterMesh);
 
-        // 4 subtle corner masking tape strips holding the A4 sheet flush against the oak wood panel
+        // 4 subtle corner masking tape strips & top pushpins holding the A3 sheet flush against the corkboard
         const posterCorners: Array<[number, number, number]> = [
-          [-OAK_POSTER_W / 2 + 0.012, OAK_POSTER_H / 2 - 0.004, 0.42],
-          [OAK_POSTER_W / 2 - 0.012, OAK_POSTER_H / 2 - 0.004, -0.42],
-          [-OAK_POSTER_W / 2 + 0.012, -OAK_POSTER_H / 2 + 0.004, -0.38],
-          [OAK_POSTER_W / 2 - 0.012, -OAK_POSTER_H / 2 + 0.004, 0.38],
+          [-OAK_POSTER_W / 2 + 0.014, OAK_POSTER_H / 2 - 0.005, 0.42],
+          [OAK_POSTER_W / 2 - 0.014, OAK_POSTER_H / 2 - 0.005, -0.42],
+          [-OAK_POSTER_W / 2 + 0.014, -OAK_POSTER_H / 2 + 0.005, -0.38],
+          [OAK_POSTER_W / 2 - 0.014, -OAK_POSTER_H / 2 + 0.005, 0.38],
         ];
         posterCorners.forEach(([tx, ty, rz]) => {
           const cornerTape = new THREE.Mesh(
-            new THREE.PlaneGeometry(0.036, 0.012),
+            new THREE.PlaneGeometry(0.042, 0.014),
             maskingTapeMat
           );
-          cornerTape.position.set(tx, ty, 0.0008);
+          cornerTape.position.set(tx, ty, 0.0009);
           cornerTape.rotation.z = rz;
           oakPosterGroup.add(cornerTape);
         });
+        [-0.08, 0.08].forEach((px) => {
+          const pPin = createPushPin(0x60a5fa);
+          pPin.position.set(px, OAK_POSTER_H / 2 - 0.014, 0.001);
+          oakPosterGroup.add(pPin);
+        });
+        corkboardGroup.add(oakPosterGroup);
 
-        capsuleStackGroup.add(oakPosterGroup);
+        // 2. Kraft Paper Sheet with 「阿璃的獨白」 Text pinned on Corkboard (縮小一點移到左上角)
+        const kraftPaperTex = createKraftMonologueTexture();
+        const KRAFT_W = 0.38; // 縮小一點
+        const KRAFT_H = 0.50; // 縮小一點
+        const monologuePaperGroup = new THREE.Group();
+        // 移到左上角 (relative to corkboard center)
+        monologuePaperGroup.position.set(-0.68, 0.46, 0.017);
+        monologuePaperGroup.rotation.z = 0.018;
+
+        const kraftPaperMesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(KRAFT_W, KRAFT_H),
+          new THREE.MeshStandardMaterial({
+            map: kraftPaperTex,
+            roughness: 0.88,
+            metalness: 0.0,
+            envMapIntensity: 0.30,
+          })
+        );
+        kraftPaperMesh.castShadow = true;
+        kraftPaperMesh.receiveShadow = true;
+        monologuePaperGroup.add(kraftPaperMesh);
+
+        // Two red pushpins + top masking tape strip securing the kraft paper
+        [-KRAFT_W / 2 + 0.045, KRAFT_W / 2 - 0.045].forEach((px) => {
+          const pin = createPushPin(0xdc2626);
+          pin.position.set(px, KRAFT_H / 2 - 0.018, 0.001);
+          monologuePaperGroup.add(pin);
+        });
+        const topKraftTape = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.068, 0.016),
+          maskingTapeMat
+        );
+        topKraftTape.position.set(0, KRAFT_H / 2 + 0.002, 0.0012);
+        topKraftTape.rotation.z = -0.03;
+        monologuePaperGroup.add(topKraftTape);
+
+        // Invisible generous raycast hitbox for clicking the kraft paper
+        const monologueHitbox = new THREE.Mesh(
+          new THREE.BoxGeometry(KRAFT_W + 0.10, KRAFT_H + 0.10, 0.14),
+          new THREE.MeshBasicMaterial({ visible: false })
+        );
+        monologueHitbox.name = 'monologue_kraft_hitbox';
+        monologueHitbox.position.set(0, 0, 0.03);
+        monologuePaperHitboxRef.current = monologueHitbox;
+        monologuePaperGroup.add(monologueHitbox);
+
+        corkboardGroup.add(monologuePaperGroup);
+
+        // Small decorative pastel sticky notes & pins on left/bottom of corkboard for lived-in balance
+        const decorNotes: Array<{ x: number; y: number; w: number; h: number; col: number; rz: number; pinCol: number }> = [
+          { x: -0.92, y: 0.56, w: 0.17, h: 0.17, col: 0xfef08a, rz: -0.06, pinCol: 0xf472b6 },
+          { x: -0.88, y: -0.22, w: 0.22, h: 0.16, col: 0xe0f2fe, rz: 0.05, pinCol: 0x38bdf8 },
+          { x: 0.62, y: -0.44, w: 0.18, h: 0.18, col: 0xfce7f3, rz: -0.04, pinCol: 0xa855f7 },
+        ];
+        decorNotes.forEach((n) => {
+          const noteMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(n.w, n.h),
+            new THREE.MeshStandardMaterial({ color: n.col, roughness: 0.84, metalness: 0.0 })
+          );
+          noteMesh.position.set(n.x, n.y, 0.0135);
+          noteMesh.rotation.z = n.rz;
+          noteMesh.receiveShadow = true;
+          corkboardGroup.add(noteMesh);
+
+          const notePin = createPushPin(n.pinCol);
+          notePin.position.set(n.x, n.y + n.h * 0.38, 0.014);
+          corkboardGroup.add(notePin);
+        });
+
+        capsuleStackGroup.add(corkboardGroup);
+
+        // Soft warm accent fill light illuminating the capsule side corkboard
+        const corkboardFillLight = new THREE.PointLight(0xfff1e2, 0.72, 4.4, 1.15);
+        corkboardFillLight.position.set(-2.45, 1.85, 1.96);
+        coloredRoomGroup.add(corkboardFillLight);
 
         // 3. Brushed-Aluminum Front Hatch-Side Access Ladder to Upper Pod (位於艙門側的爬梯)
         const ladderGroup = new THREE.Group();
@@ -9463,7 +9300,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
             const cdDisplayGroup = new THREE.Group();
             cdDisplayGroup.position.set(0, pSecondFromTopFloorY, 0.095);
             cdDisplayGroup.rotation.y = 0.06;
-            cdDisplayGroup.scale.setScalar(1.25);
+            cdDisplayGroup.scale.setScalar(1.55); // 稍微再放大CD的尺寸 (from 1.25 to 1.55)
 
             const cdStandMat = new THREE.MeshStandardMaterial({
               color: 0x93c5fd, // 淺藍色 (soft sky blue)
@@ -9873,8 +9710,9 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
           envMapIntensity: 0.36,
         });
 
+        // 稍微放大懶骨頭跟地毯尺寸
         const beanbagGroup = new THREE.Group();
-        const bbGeo = new THREE.SphereGeometry(0.42, 32, 24);
+        const bbGeo = new THREE.SphereGeometry(0.48, 32, 24); // 放大懶骨頭尺寸
         const bbPos = bbGeo.attributes.position;
         for (let i = 0; i < bbPos.count; i++) {
           let x = bbPos.getX(i);
@@ -9941,12 +9779,12 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         bbHandleLoop.castShadow = true;
         beanbagGroup.add(bbHandleLoop);
 
-        // Grounded cleanly in front of 1st Cabinet (idx === 0 at X ≈ 1.36, Z ≈ 3.228), angled toward room center
-        beanbagGroup.position.set(1.30, 0, 2.26);
+        // 地毯移到懶骨頭右前方 櫃子前面一點的位置 並放大尺寸
+        beanbagGroup.position.set(1.15, 0, 1.85); // 移近櫃子前方
         beanbagGroup.rotation.y = Math.PI + 0.38;
         coloredRoomGroup.add(beanbagGroup);
 
-        // Light-Blue Short-Pile Round Rug in Exact Center of Pink Room (房間正中間的淺藍色圓形短毛地毯)
+        // Light-Blue Short-Pile Round Rug (地毯移到懶骨頭右前方 櫃子前面一點的位置 並放大尺寸)
         const rugColorCanvas = document.createElement('canvas');
         rugColorCanvas.width = 512;
         rugColorCanvas.height = 512;
@@ -9968,7 +9806,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
           rugBCtx.fillStyle = '#808080';
           rugBCtx.fillRect(0, 0, 512, 512);
 
-          // Fine dense short-pile carpet nap fibers (no long shag)
           for (let i = 0; i < 16000; i++) {
             const fx = (i * 197 + (i % 7) * 13) % 512;
             const fy = (i * 313 + (i % 11) * 17) % 512;
@@ -9996,7 +9833,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         extraRoomTexturesToDispose.push(rugBumpTex);
 
         const centerRugGroup = new THREE.Group();
-        const RUG_R = 1.12;
+        const RUG_R = 1.35; // 放大地毯尺寸 (from 1.12 to 1.35)
 
         const rugBacking = new THREE.Mesh(
           new THREE.CylinderGeometry(RUG_R, RUG_R, 0.008, 64),
@@ -10041,7 +9878,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         rugBoundEdge.receiveShadow = true;
         centerRugGroup.add(rugBoundEdge);
 
-        centerRugGroup.position.set(PR_CENTER_X, 0, 0);
+        // 地毯移到懶骨頭右前方 櫃子前面一點的位置 (X = 0.85, Z = 1.62)
+        centerRugGroup.position.set(0.85, 0, 1.62);
         coloredRoomGroup.add(centerRugGroup);
       }
 
@@ -10544,14 +10382,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     // --- 6. ANIMATION & RENDER LOOP ---
     let animationId: number;
     const clock = new THREE.Clock();
-    const tempForward = new THREE.Vector3();
-    const tempHeldPos = new THREE.Vector3();
-    const tempZAxis = new THREE.Vector3(0, 0, 1);
-    const tempRollQuat = new THREE.Quaternion();
-    const tempHeldQuat = new THREE.Quaternion();
-    const tempCenterPos = new THREE.Vector3();
-    const tempRightPos = new THREE.Vector3();
-    const tempTopPos = new THREE.Vector3();
 
     const TABLE_VIEW_POS = new THREE.Vector3(0, SEATED_HEIGHT, SEATED_Z);
     const CABINET_VIEW_POS = new THREE.Vector3((CAB_X + CAB2_X) / 2, 1.10, CAB_Z + 2.75);
@@ -10560,11 +10390,12 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     const ROOM_CENTER_POS = new THREE.Vector3(PR_CENTER_X, 1.38, 0);
     const PINK_DESK_VIEW_POS = new THREE.Vector3(0.76, 1.30, -2.18);
     const PINK_CAPSULE_VIEW_POS = new THREE.Vector3(-4.36, 1.78, 2.95);
+    const PINK_BOARD_VIEW_POS = new THREE.Vector3(-1.72, 1.28, 1.96);
 
     const renderLoop = () => {
       const delta = Math.min(clock.getDelta(), 0.1);
 
-      // Smoothly move camera between tea table, 6-tier cabinet, doors, desk, capsule pod, and center of colored rooms
+      // Smoothly move camera between tea table, 6-tier cabinet, doors, desk, capsule pod, corkboard, and center of colored rooms
       const targetPos =
         viewLocationRef.current === 'cabinet'
           ? CABINET_VIEW_POS
@@ -10578,7 +10409,9 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
                   ? PINK_DESK_VIEW_POS
                   : viewLocationRef.current === 'capsule'
                     ? PINK_CAPSULE_VIEW_POS
-                    : TABLE_VIEW_POS;
+                    : viewLocationRef.current === 'board'
+                      ? PINK_BOARD_VIEW_POS
+                      : TABLE_VIEW_POS;
       playerPosRef.current.x = THREE.MathUtils.damp(playerPosRef.current.x, targetPos.x, 4.6, delta);
       playerPosRef.current.y = THREE.MathUtils.damp(playerPosRef.current.y, targetPos.y, 4.6, delta);
       playerPosRef.current.z = THREE.MathUtils.damp(playerPosRef.current.z, targetPos.z, 4.6, delta);
@@ -10590,108 +10423,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       camera.rotation.y = cameraYawRef.current;
       camera.rotation.x = cameraPitchRef.current;
       camera.updateMatrixWorld();
-
-      // Smoothly animate Blue-Violet Handheld Console between Tea Table and Close-Up Landscape View
-      const targetHold = isConsoleHeldRef.current ? 1 : 0;
-      if (consoleHoldLerpRef.current < targetHold) {
-        consoleHoldLerpRef.current = Math.min(1, consoleHoldLerpRef.current + delta * 3.8);
-      } else if (consoleHoldLerpRef.current > targetHold) {
-        consoleHoldLerpRef.current = Math.max(0, consoleHoldLerpRef.current - delta * 4.2);
-      }
-
-      if (consoleGroupRef.current) {
-        const l = consoleHoldLerpRef.current;
-        if (l <= 0.0001) {
-          consoleGroupRef.current.position.copy(consoleTablePos);
-          consoleGroupRef.current.quaternion.copy(consoleTableQuat);
-          consoleGroupRef.current.scale.setScalar(1.0);
-        } else {
-          const eased = l < 0.5 ? 4 * l * l * l : 1 - Math.pow(-2 * l + 2, 3) / 2;
-
-          // Bring handheld much closer to camera & flip to landscape orientation on portrait screens
-          const HOLD_DIST = 0.20;
-          const visH = 2 * HOLD_DIST * Math.tan(THREE.MathUtils.degToRad(32.5));
-          const visW = visH * camera.aspect;
-          const isPortrait = camera.aspect < 1.0;
-
-          tempRollQuat.setFromAxisAngle(tempZAxis, isPortrait ? -Math.PI / 2 : 0);
-          tempHeldQuat.copy(camera.quaternion).multiply(tempRollQuat);
-
-          const heldSpanW = isPortrait ? CONSOLE_H : CONSOLE_W;
-          const heldSpanH = isPortrait ? CONSOLE_W : CONSOLE_H;
-          const heldScale = Math.min((visW * 0.96) / heldSpanW, (visH * 0.96) / heldSpanH);
-
-          tempForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-          tempHeldPos
-            .copy(camera.position)
-            .addScaledVector(tempForward, HOLD_DIST);
-
-          consoleGroupRef.current.position.lerpVectors(consoleTablePos, tempHeldPos, eased);
-          consoleGroupRef.current.quaternion.slerpQuaternions(consoleTableQuat, tempHeldQuat, eased);
-          const s = THREE.MathUtils.lerp(1.0, heldScale, eased);
-          consoleGroupRef.current.scale.setScalar(s);
-        }
-
-        // Tactile D-Pad press & continuous scroll when held
-        if (dpadGroupRef.current) {
-          const dir = activeDpadDirRef.current;
-          const targetTiltX = dir === -1 ? -0.15 : dir === 1 ? 0.15 : 0;
-          const targetDpadZ = dir !== 0 ? dpadRestZRef.current - 0.0014 : dpadRestZRef.current;
-          dpadGroupRef.current.rotation.x = THREE.MathUtils.lerp(dpadGroupRef.current.rotation.x, targetTiltX, 0.35);
-          dpadGroupRef.current.position.z = THREE.MathUtils.lerp(dpadGroupRef.current.position.z, targetDpadZ, 0.35);
-
-          if (dir !== 0 && isConsoleHeldRef.current && isScreenActiveRef.current) {
-            if (performance.now() - dpadPressStartTimeRef.current >= 140) {
-              dpadHasScrolledRef.current = true;
-              desktopIframeRef.current?.contentWindow?.postMessage(
-                { type: 'console_scroll', deltaY: dir * (delta * 900), smooth: false },
-                window.location.origin
-              );
-            }
-          }
-        }
-
-        // Tactile ABXY button press depression animation
-        if (abxyPressedTimerRef.current > 0) {
-          abxyPressedTimerRef.current = Math.max(0, abxyPressedTimerRef.current - delta);
-        }
-        faceButtonMeshesRef.current.forEach((btnMesh, idx) => {
-          const isPressed = abxyPressedTimerRef.current > 0 && pressedFaceBtnIdxRef.current === idx;
-          const targetBtnZ = isPressed ? faceButtonRestZRef.current - 0.0024 : faceButtonRestZRef.current;
-          btnMesh.position.z = THREE.MathUtils.lerp(btnMesh.position.z, targetBtnZ, 0.45);
-        });
-
-        // Synchronize interactive 16:9 desktop website overlay precisely over the 3D screen aperture
-        const shouldActivateScreen = isConsoleHeldRef.current && l >= 0.97;
-        if (shouldActivateScreen !== isScreenActiveRef.current) {
-          isScreenActiveRef.current = shouldActivateScreen;
-          setIsScreenActive(shouldActivateScreen);
-        }
-
-        if (shouldActivateScreen && screenOverlayRef.current) {
-          const viewW = container.clientWidth || window.innerWidth;
-          const viewH = container.clientHeight || window.innerHeight;
-          consoleGroupRef.current.updateMatrixWorld(true);
-
-          tempCenterPos.set(0, 0, 0).applyMatrix4(screenMesh.matrixWorld).project(camera);
-          tempRightPos.set(SCREEN_W / 2, 0, 0).applyMatrix4(screenMesh.matrixWorld).project(camera);
-          tempTopPos.set(0, SCREEN_H / 2, 0).applyMatrix4(screenMesh.matrixWorld).project(camera);
-
-          const cx = (tempCenterPos.x * 0.5 + 0.5) * viewW;
-          const cy = (-tempCenterPos.y * 0.5 + 0.5) * viewH;
-          const rx = (tempRightPos.x * 0.5 + 0.5) * viewW;
-          const ry = (-tempRightPos.y * 0.5 + 0.5) * viewH;
-          const tx = (tempTopPos.x * 0.5 + 0.5) * viewW;
-          const ty = (-tempTopPos.y * 0.5 + 0.5) * viewH;
-
-          const pxW = Math.hypot((rx - cx) * 2, (ry - cy) * 2);
-          const pxH = Math.hypot((tx - cx) * 2, (ty - cy) * 2);
-          const angleRad = Math.atan2(ry - cy, rx - cx);
-
-          screenOverlayRef.current.style.transform =
-            `translate3d(${cx}px, ${cy}px, 0) translate(-50%, -50%) rotate(${angleRad}rad) scale(${pxW / 1600}, ${pxH / 900})`;
-        }
-      }
 
       // Smooth clockwise damped rotation for Lobby & Colored Rooms' steampunk pointers & outer gear rings
       if (portalWheelRef.current) {
@@ -10757,11 +10488,30 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       renderer.setSize(w, h);
     };
 
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isCalendarModalOpenRef.current) {
+          isCalendarModalOpenRef.current = false;
+          setIsCalendarModalOpen(false);
+        }
+        if (isMonologueOpenRef.current) {
+          isMonologueOpenRef.current = false;
+          setIsMonologueOpen(false);
+        }
+        if (isCyanFloorDialogOpenRef.current) {
+          isCyanFloorDialogOpenRef.current = false;
+          setIsCyanFloorDialogOpen(false);
+        }
+      }
+    };
+
     window.addEventListener('resize', handleResize);
+    window.addEventListener('keydown', handleKeyDown);
 
     return () => {
       cancelAnimationFrame(animationId);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleKeyDown);
       if (portalSwapTimeoutRef.current !== null) window.clearTimeout(portalSwapTimeoutRef.current);
       if (portalFadeEndTimeoutRef.current !== null) window.clearTimeout(portalFadeEndTimeoutRef.current);
 
@@ -10785,11 +10535,10 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       door2FEngravingTex.dispose();
       doorB1EngravingTex.dispose();
       extraRoomTexturesToDispose.forEach((tex) => tex.dispose());
-      consoleScreenTex.dispose();
+      wallCalendarTexture.dispose();
       scrollTexture.dispose();
       displayPosterTexture.dispose();
       fanTexture.dispose();
-      plaqueTexture.dispose();
       vinylCenterTexture.dispose();
       vinylDiscFaceTexture.dispose();
       suzumiScrollTexture.dispose();
@@ -10846,113 +10595,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       }
       return next;
     });
-  };
-
-  // Toggle Handheld Console between Tea Table and Close-Up Interactive Landscape View
-  const handleToggleConsole = (hold: boolean) => {
-    isConsoleHeldRef.current = hold;
-    setIsConsoleHeld(hold);
-    if (!hold) {
-      isScreenActiveRef.current = false;
-      setIsScreenActive(false);
-      activeDpadDirRef.current = 0;
-      activeConsoleTouchIdRef.current = null;
-      activeConsoleTouchRoleRef.current = null;
-      activeConsoleMouseRoleRef.current = null;
-    }
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      try { navigator.vibrate(18); } catch {}
-    }
-  };
-
-  // Raycast held console controls: Left D-Pad (scroll up/down), Right ABXY (pull rope), or chassis/outside
-  const raycastHeldConsole = (
-    clientX: number,
-    clientY: number
-  ): { role: 'dpad_up' | 'dpad_down' | 'abxy' | 'chassis' | 'outside'; btnIdx?: number } => {
-    if (!containerRef.current || !cameraRef.current) return { role: 'outside' };
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
-
-    const controlTargets = [
-      dpadUpHitboxRef.current,
-      dpadDownHitboxRef.current,
-      abxyHitboxRef.current,
-    ].filter((obj): obj is THREE.Mesh => obj !== null);
-
-    const ctrlHits = raycasterRef.current.intersectObjects(controlTargets, false);
-    if (ctrlHits.length > 0) {
-      const hit = ctrlHits[0];
-      if (hit.object.name === 'dpad_up_hitbox') return { role: 'dpad_up' };
-      if (hit.object.name === 'dpad_down_hitbox') return { role: 'dpad_down' };
-      if (hit.object.name === 'abxy_hitbox') {
-        let closestIdx = 0;
-        let minDist = Infinity;
-        const tmpWorld = new THREE.Vector3();
-        faceButtonMeshesRef.current.forEach((btnMesh, idx) => {
-          btnMesh.getWorldPosition(tmpWorld);
-          const d = tmpWorld.distanceToSquared(hit.point);
-          if (d < minDist) {
-            minDist = d;
-            closestIdx = idx;
-          }
-        });
-        return { role: 'abxy', btnIdx: closestIdx };
-      }
-    }
-
-    if (consoleGroupRef.current) {
-      const bodyHits = raycasterRef.current.intersectObjects(consoleGroupRef.current.children, true);
-      if (bodyHits.length > 0) {
-        return { role: 'chassis' };
-      }
-    }
-
-    return { role: 'outside' };
-  };
-
-  // Press D-Pad / ABXY helper (called on touchStart / mouseDown while console is held)
-  const triggerHeldControlDown = (
-    hit: { role: 'dpad_up' | 'dpad_down' | 'abxy' | 'chassis' | 'outside'; btnIdx?: number }
-  ): 'dpad' | 'abxy' | 'chassis' | null => {
-    if (hit.role === 'dpad_up' || hit.role === 'dpad_down') {
-      activeDpadDirRef.current = hit.role === 'dpad_up' ? -1 : 1;
-      dpadPressStartTimeRef.current = performance.now();
-      dpadHasScrolledRef.current = false;
-      if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        try { navigator.vibrate(10); } catch {}
-      }
-      return 'dpad';
-    }
-    if (hit.role === 'abxy') {
-      abxyPressedTimerRef.current = 0.18;
-      pressedFaceBtnIdxRef.current = hit.btnIdx ?? 0;
-      desktopIframeRef.current?.contentWindow?.postMessage(
-        { type: 'console_pull_rope' },
-        window.location.origin
-      );
-      if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        try { navigator.vibrate(18); } catch {}
-      }
-      return 'abxy';
-    }
-    if (hit.role === 'chassis') {
-      return 'chassis';
-    }
-    return null;
-  };
-
-  const releaseHeldDpad = () => {
-    const dir = activeDpadDirRef.current;
-    if (dir !== 0 && !dpadHasScrolledRef.current && isScreenActiveRef.current) {
-      desktopIframeRef.current?.contentWindow?.postMessage(
-        { type: 'console_scroll', deltaY: dir * 240, smooth: true },
-        window.location.origin
-      );
-    }
-    activeDpadDirRef.current = 0;
   };
 
     // Rotate steampunk pointer clockwise on a dial state
@@ -11070,7 +10712,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         setIsPinkNavOpen(false);
 
         if (lobbyRoomGroupRef.current) lobbyRoomGroupRef.current.visible = isLobby;
-        if (consoleSceneRef.current) consoleSceneRef.current.visible = isLobby;
         (['purple', 'green', 'gold', 'pink', 'cyan', 'cyan_b1', 'royalblue', 'brown'] as const).forEach((roomId) => {
           const rg = extraRoomsRef.current[roomId].roomGroup;
           if (rg) rg.visible = targetRoom === roomId;
@@ -11122,17 +10763,9 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     };
     enterPortalRoomRef.current = handleEnterPortalRoom;
 
-    // Raycast tap handler: Dial spin, Portal Door room swap, Console pickup & Table Lamp toggle
+    // Raycast tap handler: Dial spin, Portal Door room swap, Wall Calendar, Monologue Kraft Paper & Table Lamp toggle
     const handleSceneTap = (clientX: number, clientY: number): boolean => {
-      if (isCyanFloorDialogOpenRef.current) {
-        return false;
-      }
-      if (isConsoleHeldRef.current) {
-        const hit = raycastHeldConsole(clientX, clientY);
-        if (hit.role === 'outside') {
-          handleToggleConsole(false);
-          return true;
-        }
+      if (isCyanFloorDialogOpenRef.current || isCalendarModalOpenRef.current || isMonologueOpenRef.current) {
         return false;
       }
 
@@ -11278,17 +10911,34 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         }
       }
 
-      if (activeRoomRef.current === 'lobby' && viewLocationRef.current === 'table') {
-        // 3. Check Blue-Violet Handheld Console tap first
-        if (consoleGroupRef.current) {
-          const consoleHits = raycasterRef.current.intersectObjects(consoleGroupRef.current.children, true);
-          if (consoleHits.length > 0) {
-            handleToggleConsole(true);
-            return true;
+      // 3. Lobby Wall Calendar tap (活動行事曆)
+      if (currentRoom === 'lobby' && wallCalendarHitboxRef.current) {
+        const calHits = raycasterRef.current.intersectObject(wallCalendarHitboxRef.current, false);
+        if (calHits.length > 0) {
+          isCalendarModalOpenRef.current = true;
+          setIsCalendarModalOpen(true);
+          if (typeof navigator !== 'undefined' && navigator.vibrate) {
+            try { navigator.vibrate(15); } catch {}
           }
+          return true;
         }
+      }
 
-        // 4. Check Table Lamp tap
+      // 4. Pink Room Corkboard Kraft Paper tap (阿璃的獨白)
+      if (currentRoom === 'pink' && monologuePaperHitboxRef.current) {
+        const monoHits = raycasterRef.current.intersectObject(monologuePaperHitboxRef.current, false);
+        if (monoHits.length > 0) {
+          isMonologueOpenRef.current = true;
+          setIsMonologueOpen(true);
+          if (typeof navigator !== 'undefined' && navigator.vibrate) {
+            try { navigator.vibrate(15); } catch {}
+          }
+          return true;
+        }
+      }
+
+      if (activeRoomRef.current === 'lobby' && viewLocationRef.current === 'table') {
+        // 5. Check Table Lamp tap
         if (lampGroupRef.current) {
           const lampHits = raycasterRef.current.intersectObjects(lampGroupRef.current.children, true);
           if (lampHits.length > 0) {
@@ -11315,9 +10965,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     if (isCyanFloorDialogOpenRef.current) {
       isCyanFloorDialogOpenRef.current = false;
       setIsCyanFloorDialogOpen(false);
-    }
-    if (isConsoleHeldRef.current) {
-      handleToggleConsole(false);
     }
     normalizeCurrentYaw();
     const next: 'table' | 'cabinet' | 'door' | 'door2' | 'center' =
@@ -11373,8 +11020,8 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     }
   };
 
-  // Smoothly navigate inside Pink Room (desk, upper capsule interior, room center, or front door)
-  const handleSelectPinkView = (target: 'desk' | 'capsule' | 'center' | 'door') => {
+  // Smoothly navigate inside Pink Room (desk, upper capsule interior, corkboard, room center, or front door)
+  const handleSelectPinkView = (target: 'desk' | 'capsule' | 'board' | 'center' | 'door') => {
     normalizeCurrentYaw();
     viewLocationRef.current = target;
     setViewLocation(target);
@@ -11384,6 +11031,9 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     } else if (target === 'capsule') {
       targetYawRef.current = CENTER_YAW;
       targetPitchRef.current = -0.04;
+    } else if (target === 'board') {
+      targetYawRef.current = Math.PI / 2;
+      targetPitchRef.current = -0.02;
     } else {
       targetYawRef.current = CENTER_YAW;
       targetPitchRef.current = 0;
@@ -11397,7 +11047,12 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
   // Apply look rotation: Lobby-style rooms (lobby, royalblue, brown) preserve T-shape bounds;
   // Cyan Foyers (2F & B1) lock camera angle; other rooms allow 360° horizontal + slight vertical
   const applyLookDelta = (deltaX: number, deltaY: number, sensitivity: number) => {
-    if (isFoyerRoom(activeRoomRef.current) || isCyanFloorDialogOpenRef.current) {
+    if (
+      isFoyerRoom(activeRoomRef.current) ||
+      isCyanFloorDialogOpenRef.current ||
+      isCalendarModalOpenRef.current ||
+      isMonologueOpenRef.current
+    ) {
       return;
     }
     targetYawRef.current -= deltaX * sensitivity;
@@ -11432,17 +11087,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       touchStartTime.current = performance.now();
       touchHasMoved.current = false;
 
-      if (isConsoleHeldRef.current && isScreenActiveRef.current) {
-        const hit = raycastHeldConsole(touch.clientX, touch.clientY);
-        const role = triggerHeldControlDown(hit);
-        if (role) {
-          activeConsoleTouchIdRef.current = touch.identifier;
-          activeConsoleTouchRoleRef.current = role;
-          lookTouchIdRef.current = null;
-          return;
-        }
-      }
-
       lookLastPosRef.current = { x: touch.clientX, y: touch.clientY };
       lookTouchIdRef.current = touch.identifier;
     }
@@ -11459,12 +11103,10 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
           touchHasMoved.current = true;
         }
 
-        if (!isConsoleHeldRef.current) {
-          const deltaX = touch.clientX - lookLastPosRef.current.x;
-          const deltaY = touch.clientY - lookLastPosRef.current.y;
-          lookLastPosRef.current = { x: touch.clientX, y: touch.clientY };
-          applyLookDelta(deltaX, deltaY, 0.0032);
-        }
+        const deltaX = touch.clientX - lookLastPosRef.current.x;
+        const deltaY = touch.clientY - lookLastPosRef.current.y;
+        lookLastPosRef.current = { x: touch.clientX, y: touch.clientY };
+        applyLookDelta(deltaX, deltaY, 0.0032);
       }
     }
   };
@@ -11473,14 +11115,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     lastTouchTimeRef.current = performance.now();
     for (let i = 0; i < e.changedTouches.length; i++) {
       const touch = e.changedTouches[i];
-      if (touch.identifier === activeConsoleTouchIdRef.current) {
-        if (activeConsoleTouchRoleRef.current === 'dpad') {
-          releaseHeldDpad();
-        }
-        activeConsoleTouchIdRef.current = null;
-        activeConsoleTouchRoleRef.current = null;
-        continue;
-      }
       if (touch.identifier === lookTouchIdRef.current) {
         const duration = performance.now() - touchStartTime.current;
         if (!touchHasMoved.current && duration < 400) {
@@ -11491,25 +11125,13 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
     }
   };
 
-  // --- DESKTOP MOUSE LOOK + CONSOLE CONTROLS/LAMP CLICK ---
+  // --- DESKTOP MOUSE LOOK + SCENE OBJECT CLICK ---
   const handleMouseDown = (e: React.MouseEvent) => {
     if (performance.now() - lastTouchTimeRef.current < 600) return;
     mouseStartPos.current = { x: e.clientX, y: e.clientY };
     mouseStartTime.current = performance.now();
     mouseHasMoved.current = false;
     mouseLastPosRef.current = { x: e.clientX, y: e.clientY };
-
-    if (isConsoleHeldRef.current && isScreenActiveRef.current) {
-      const hit = raycastHeldConsole(e.clientX, e.clientY);
-      const role = triggerHeldControlDown(hit);
-      if (role) {
-        activeConsoleMouseRoleRef.current = role;
-        isMouseDownRef.current = false;
-        return;
-      }
-    }
-
-    activeConsoleMouseRoleRef.current = null;
     isMouseDownRef.current = true;
   };
 
@@ -11521,7 +11143,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       mouseHasMoved.current = true;
     }
 
-    if (!isConsoleHeldRef.current && isMouseDownRef.current) {
+    if (isMouseDownRef.current) {
       const deltaX = e.clientX - mouseLastPosRef.current.x;
       const deltaY = e.clientY - mouseLastPosRef.current.y;
       mouseLastPosRef.current = { x: e.clientX, y: e.clientY };
@@ -11531,13 +11153,6 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
 
   const handleMouseUp = (e: React.MouseEvent) => {
     if (performance.now() - lastTouchTimeRef.current < 600) return;
-    if (activeConsoleMouseRoleRef.current) {
-      if (activeConsoleMouseRoleRef.current === 'dpad') {
-        releaseHeldDpad();
-      }
-      activeConsoleMouseRoleRef.current = null;
-      return;
-    }
     isMouseDownRef.current = false;
     const duration = performance.now() - mouseStartTime.current;
     if (!mouseHasMoved.current && duration < 400) {
@@ -11547,17 +11162,21 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
 
   const handleMouseLeave = () => {
     isMouseDownRef.current = false;
-    if (activeConsoleMouseRoleRef.current === 'dpad') {
-      releaseHeldDpad();
-    }
-    activeConsoleMouseRoleRef.current = null;
+  };
+
+  const handleCloseCalendarModal = () => {
+    isCalendarModalOpenRef.current = false;
+    setIsCalendarModalOpen(false);
+  };
+
+  const handleCloseMonologue = () => {
+    isMonologueOpenRef.current = false;
+    setIsMonologueOpen(false);
   };
 
   return (
     <div 
-      className={`absolute inset-0 w-full h-full select-none overflow-hidden bg-[#0c0907] ${
-        isConsoleHeld ? '' : 'touch-none'
-      }`}
+      className="absolute inset-0 w-full h-full select-none overflow-hidden bg-[#0c0907] touch-none"
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -11571,57 +11190,16 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       <div 
         ref={containerRef} 
         className={`absolute inset-0 w-full h-full touch-none ${
-          isConsoleHeld
-            ? 'cursor-pointer'
-            : isFoyerRoom(activeRoom)
-              ? 'cursor-default'
-              : 'cursor-grab active:cursor-grabbing'
+          isFoyerRoom(activeRoom)
+            ? 'cursor-default'
+            : 'cursor-grab active:cursor-grabbing'
         }`} 
       />
 
-      {/* Live Touch-Interactive 16:9 Original Desktop Website Overlay on Console Screen */}
-      {isConsoleHeld && (
-        <div
-          ref={screenOverlayRef}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: 1600,
-            height: 900,
-            transformOrigin: 'center center',
-            zIndex: 25,
-            opacity: isScreenActive ? 1 : 0,
-            pointerEvents: isScreenActive ? 'auto' : 'none',
-            touchAction: 'auto',
-            transition: 'opacity 180ms ease-out',
-          }}
-          className="overflow-hidden bg-[#001B3D] rounded-[8px] shadow-[0_0_24px_rgba(0,0,0,0.6)]"
-          onTouchStart={(e) => e.stopPropagation()}
-          onTouchMove={(e) => e.stopPropagation()}
-          onTouchEnd={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onMouseMove={(e) => e.stopPropagation()}
-          onMouseUp={(e) => e.stopPropagation()}
-        >
-          <iframe
-            ref={desktopIframeRef}
-            src={desktopEmbedUrl}
-            title="保持可愛漫研社 電腦版網站"
-            width={1600}
-            height={900}
-            className="w-[1600px] h-[900px] border-0 block"
-            style={{ touchAction: 'auto' }}
-          />
-        </div>
-      )}
-
       {/* Center Subtle Focus Ring */}
-      {!isConsoleHeld && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-25">
-          <div className="w-2.5 h-2.5 rounded-full border border-amber-300/70 bg-white/15 shadow-sm" />
-        </div>
-      )}
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-25">
+        <div className="w-2.5 h-2.5 rounded-full border border-amber-300/70 bg-white/15 shadow-sm" />
+      </div>
 
       {/* Portal Door Room-Switch Cross-Dissolve Veil */}
       <div
@@ -11631,7 +11209,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       />
 
       {/* Bottom-Right Navigation Buttons */}
-      {!isConsoleHeld && activeRoom === 'lobby' && (
+      {activeRoom === 'lobby' && (
         <div className="absolute bottom-5 right-5 z-30 flex flex-col gap-2.5">
           <button
             type="button"
@@ -11667,7 +11245,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
       )}
 
       {/* 1F Lobby Cyan Portal Door Floor-Choice Dialog (上樓 / 下樓) */}
-      {!isConsoleHeld && activeRoom === 'lobby' && isCyanFloorDialogOpen && (
+      {activeRoom === 'lobby' && isCyanFloorDialogOpen && (
         <div
           className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] p-4"
           onClick={(e) => {
@@ -11723,8 +11301,57 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         </div>
       )}
 
+      {/* Lobby Wall Event Calendar Modal (活動行事曆彈窗) */}
+      {isCalendarModalOpen && (
+        <div
+          className="fixed inset-0 z-[9000] flex items-center justify-center bg-[#020817]/88 p-3 sm:p-6 overflow-y-auto"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleCloseCalendarModal();
+          }}
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onMouseMove={(e) => e.stopPropagation()}
+          onMouseUp={(e) => e.stopPropagation()}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="紡塊像素活動行事曆"
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl bg-[#040d1e] border border-sky-300/30 shadow-[0_24px_70px_rgba(0,0,0,0.85)]"
+          >
+            <button
+              type="button"
+              onClick={handleCloseCalendarModal}
+              aria-label="關閉行事曆"
+              className="sticky top-3 float-right mr-3 mt-3 z-20 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/15 cursor-pointer transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <EventCalendar mode="all" />
+          </div>
+        </div>
+      )}
+
+      {/* Pink Room Monologue Enlarged Modal (阿璃的獨白放大閱讀) */}
+      {isMonologueOpen && (
+        <div
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onMouseMove={(e) => e.stopPropagation()}
+          onMouseUp={(e) => e.stopPropagation()}
+        >
+          <EscalatorMonologueSubpage onClose={handleCloseMonologue} />
+        </div>
+      )}
+
       {/* Non-Lobby Rooms Bottom-Right Button(s) */}
-      {!isConsoleHeld && activeRoom !== 'lobby' && activeRoom === 'pink' && (
+      {activeRoom !== 'lobby' && activeRoom === 'pink' && (
         <div
           className="absolute bottom-5 right-5 z-30 flex flex-col items-end"
           onTouchStart={(e) => e.stopPropagation()}
@@ -11770,6 +11397,20 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
                   }`}
                 >
                   去膠囊艙裡
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSelectPinkView('board');
+                  }}
+                  className={`w-full px-2.5 py-1.5 rounded-lg text-xs font-medium tracking-wide active:scale-95 transition-all cursor-pointer select-none border text-center ${
+                    viewLocation === 'board'
+                      ? 'bg-[#1c4069] border-sky-200 text-white shadow-[0_0_10px_rgba(154,221,255,0.35)]'
+                      : 'bg-[#12263f]/85 border-sky-300/35 text-sky-100 hover:bg-[#193557] hover:border-sky-200/75'
+                  }`}
+                >
+                  去佈告欄前
                 </button>
                 <button
                   type="button"
@@ -11835,7 +11476,7 @@ export const Room3DScene: React.FC<Room3DSceneProps> = () => {
         </div>
       )}
 
-      {!isConsoleHeld && activeRoom !== 'lobby' && activeRoom !== 'pink' && (
+      {activeRoom !== 'lobby' && activeRoom !== 'pink' && (
         <div className="absolute bottom-5 right-5 z-30 flex flex-col gap-2.5">
           <button
             type="button"
